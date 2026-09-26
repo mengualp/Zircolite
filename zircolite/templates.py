@@ -12,6 +12,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+import orjson
 from jinja2 import Environment
 
 from .attack import extract_attack_tactics, extract_attack_techniques
@@ -120,6 +121,18 @@ def csv_field(value: Any) -> str:
     return '"' + text.replace('"', '""') + '"'
 
 
+def flat_json(value: Any) -> Any:
+    """A nested value as JSON text, for targets that want one scalar per field.
+
+    Elasticsearch maps every key of a nested object as a field of its own, so a
+    correlation alert's evidence would add one field per event column and soon
+    exceed the index's field limit; the Mini-GUI shows each value as text.
+    """
+    if isinstance(value, (dict, list)):
+        return orjson.dumps(value).decode()
+    return value
+
+
 def _make_jinja2_env() -> Environment:
     """Create a Jinja2 Environment with Zircolite-specific filters.
 
@@ -135,6 +148,7 @@ def _make_jinja2_env() -> Environment:
     """
     env = Environment(autoescape=False)  # noqa: S701 - see docstring
     env.filters['csv_field'] = csv_field
+    env.filters['flat_json'] = flat_json
     env.filters['extract_attack_techniques'] = extract_attack_techniques
     env.filters['extract_attack_tactics'] = extract_attack_tactics
     env.globals['collect_navigator_techniques'] = _collect_navigator_techniques
