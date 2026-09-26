@@ -3313,7 +3313,7 @@ class TestCLIRegressionFixes:
 
         with patch('sys.argv', [
             'zircolite.py', '-e', str(events), '-j',
-            '-r', 'rules/rules_linux_high.json',
+            '-r', 'rules/rules_linux.json',
             '-c', str(config), '-o', str(out), *get_log_arg(tmp_path),
         ]):
             zircolite_script.main()
@@ -3327,7 +3327,7 @@ class TestCLIRegressionFixes:
 
         with pytest.raises(SystemExit) as exc_info, patch('sys.argv', [
             'zircolite.py', '-e', str(events), '-j',
-            '-r', 'myrules/rules_linux_high.json',
+            '-r', 'myrules/rules_linux.json',
             '-c', str(config), '-o', str(tmp_path / "out.json"), *get_log_arg(tmp_path),
         ]):
             zircolite_script.main()

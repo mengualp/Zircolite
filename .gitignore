@@ -116,5 +116,7 @@ samples/
 # and tools/package-release.py refuses to ship anything else as DRL.
 rules/*
 !rules/README.md
-!rules/rules_windows_*.json
+!rules/rules_windows_sysmon*.json
+!rules/rules_windows_generic*.json
+!rules/rules_windows_merged*.json
 !rules/rules_linux*.json
