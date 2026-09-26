@@ -17,6 +17,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import patch
 
 import pytest
@@ -3882,3 +3883,73 @@ class TestEvidenceNamesPrintAsWritten:
             zircolite_script.main()
 
         assert "[bold]x.evtx" in capsys.readouterr().out
+
+
+@pytest.mark.requires_sigma
+@pytest.mark.skipif(__import__("sqlite3").sqlite_version_info < (3, 38), reason="correlation plans need SQLite 3.38")
+class TestCorrelationsNeedOneDatabase:
+    """A correlation only sees the events of its database; per-file and
+    parallel modes give every file a database of its own."""
+
+    BASE: ClassVar[dict] = {"title": "base", "name": "base", "logsource": {"product": "windows"},
+            "detection": {"s": {"EventID": 1}, "condition": "s"}}
+    BURST: ClassVar[dict] = {"title": "burst", "level": "high", "correlation": {
+        "type": "event_count", "rules": ["base"], "group-by": ["Host"],
+        "timespan": "5s", "condition": {"gte": 2}}}
+
+    def _run(self, tmp_path, *extra):
+        import yaml
+
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        for i, stamp in enumerate(["2024-01-01T00:00:00Z", "2024-01-01T00:00:01Z"]):
+            (logs / f"{i}.json").write_text(json.dumps({"SystemTime": stamp, "Host": "h", "EventID": 1}) + "\n")
+        base = tmp_path / "base.yml"
+        burst = tmp_path / "burst.yml"
+        base.write_text(yaml.safe_dump(self.BASE))
+        burst.write_text(yaml.safe_dump(self.BURST))
+        output = tmp_path / "detections.json"
+        argv = ["zircolite.py", "-e", str(logs), "-j", "-r", str(burst), str(base), "-o", str(output),
+                "--timefield", "SystemTime", *get_log_arg(tmp_path), *extra]
+        with patch("sys.argv", argv):
+            zircolite_script.main()
+        return json.loads(output.read_text()), (tmp_path / "test.log").read_text()
+
+    def test_files_are_correlated_in_one_database(self, tmp_path):
+        results, log = self._run(tmp_path)
+
+        [result] = results
+        assert result["alert_count"] == 1
+        assert result["event_count"] == 2
+        assert {e["event"]["OriginalLogfile"] for e in result["matches"][0]["evidence"]} == {"0.json", "1.json"}
+        assert "correlation rule(s) need every file in one database" in log
+
+    def test_no_auto_mode_keeps_files_apart_and_says_so(self, tmp_path):
+        results, log = self._run(tmp_path, "--no-auto-mode")
+
+        assert results == []
+        assert "see one file at a time" in log
+
+    def test_an_explicit_process_executor_is_reported_as_ignored(self, tmp_path):
+        results, log = self._run(tmp_path, "--executor", "process")
+
+        assert results[0]["alert_count"] == 1
+        assert "--executor process ignored" in log
+
+
+class TestCorrelationRuleCount:
+    def test_rules_removed_by_rulefilter_do_not_count(self):
+        rules = [{"title": "burst", "correlation": True}, {"title": "noise", "correlation": True}, {"title": "plain"}]
+
+        assert zircolite_script._correlation_rule_count(rules, None) == 2
+        assert zircolite_script._correlation_rule_count(rules, ["noi"]) == 1
+
+    def test_several_databases_are_said_to_stay_apart(self, caplog):
+        logger = logging.getLogger("correlation-databases")
+        with caplog.at_level(logging.WARNING, logger="correlation-databases"):
+            zircolite_script._warn_correlations_across_databases(2, 3, logger)
+            zircolite_script._warn_correlations_across_databases(2, 1, logger)
+            zircolite_script._warn_correlations_across_databases(0, 3, logger)
+
+        assert len(caplog.records) == 1
+        assert "3 databases" in caplog.text

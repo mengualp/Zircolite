@@ -916,6 +916,22 @@ def _warn_ignored_db_flags(
         )
 
 
+def _correlation_rule_count(rulesets: list[dict[str, Any]], rule_filters: list[str] | None) -> int:
+    """Correlation rules left once -R has removed the rules it names."""
+    return sum(
+        1 for rule in rulesets
+        if rule.get("correlation") and not any(f in rule.get("title", "") for f in rule_filters or ())
+    )
+
+
+def _warn_correlations_across_databases(count: int, databases: int, logger: logging.Logger) -> None:
+    if count and databases > 1:
+        logger.warning(
+            f"[yellow]   [!] Each of the {databases} databases is analysed on its own: the "
+            f"{count} correlation rule(s) do not see events across databases[/]"
+        )
+
+
 def _run_processing(
     ctx: ProcessingContext,
     args: argparse.Namespace,
@@ -941,10 +957,13 @@ def _run_processing(
 
     phase_setup_end = time.perf_counter()
 
+    correlations = _correlation_rule_count(ctx.rulesets, getattr(args, "rulefilter", None))
+
     # ----- DB input mode (explicit -D) -----
     if args.db_input:
         _warn_ignored_db_flags(args, logger)
         db_files = expand_db_path(Path(args.evtx), args, logger)
+        _warn_correlations_across_databases(correlations, len(db_files), logger)
         ctx.parent_metrics.data["seconds"]["setup"] += time.perf_counter() - phase_setup_end
         zircolite_core, all_results = process_db_input(ctx, args, file_list=db_files)
         # Report the databases actually scanned, not a hardcoded 1
@@ -993,6 +1012,7 @@ def _run_processing(
     # DB input mode (auto-detected SQLite file)
     if args.db_input:
         _warn_ignored_db_flags(args, logger)
+        _warn_correlations_across_databases(correlations, len(file_list), logger)
         ctx.parent_metrics.data["seconds"]["setup"] += time.perf_counter() - phase_setup_end
         zircolite_core, all_results = process_db_input(ctx, args, file_list=file_list)
         return zircolite_core, all_results, log_list, phase_setup_end
@@ -1015,6 +1035,29 @@ def _run_processing(
     ]
     force_sequential = bool(sequential_reasons)
 
+    # A correlation only sees the events of its database, and per-file and
+    # parallel modes give every file a database of its own.
+    unified_for_correlations = False
+    if correlations and len(file_list) > 1 and not args.unified_db:
+        if args.no_auto_mode:
+            logger.warning(
+                f"[yellow]   [!] --no-auto-mode keeps one database per file, so the {correlations} "
+                "correlation rule(s) see one file at a time: add --unified-db to correlate across files[/]"
+            )
+        else:
+            args.unified_db = unified_for_correlations = True
+            ignored = [
+                flag for flag, applies in (
+                    ("--executor process", getattr(args, "executor", None) == "process" and _is_explicit(args, "executor")),
+                    ("--parallel-workers", _is_explicit(args, "parallel_workers")),
+                ) if applies
+            ]
+            if ignored:
+                logger.warning(
+                    f"[yellow]   [!] {' and '.join(ignored)} ignored: correlation rules need "
+                    "every file in one database[/]"
+                )
+
     if not args.no_auto_mode and not args.unified_db:
         recommended_mode, reason, stats = analyze_files_and_recommend_mode(file_list)
         forced_workers = getattr(args, 'parallel_workers', None)
@@ -1032,7 +1075,11 @@ def _run_processing(
                 use_parallel = True
                 parallel_workers = forced_workers
     elif args.unified_db:
-        logger.info("[+] [cyan]Database mode:[/] [green]UNIFIED[/] (forced)")
+        reason = (
+            f"{correlations} correlation rule(s) need every file in one database"
+            if unified_for_correlations else "forced"
+        )
+        logger.info(f"[+] [cyan]Database mode:[/] [green]UNIFIED[/] ({reason})")
         logger.info("")
     else:
         if not getattr(args, 'no_parallel', False) and not force_sequential and len(file_list) > 1:
