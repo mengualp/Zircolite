@@ -62,8 +62,11 @@ python = ">=3.10,<3.16"
 # the list, `uv sync` would keep a kernel older than its source.
 [tool.uv]
 cache-keys = [{ file = "pyproject.toml" }, { file = "setup.py" }, { file = "zircolite/flatten_kernel.py" }]
-# Leave a release a week to be yanked before uv resolves to it.
-exclude-newer = "7 days"
+# Leave a release a few days to be yanked before uv resolves to it.
+exclude-newer = "3 days"
+# Released in step with Zircolite by the same maintainer: holding it back only
+# holds a release back from the backend it was built against.
+exclude-newer-package = { pysigma-backend-sqlite = false }
 
 [tool.ruff]
 # Without an explicit config ruff lints against whatever its current default
