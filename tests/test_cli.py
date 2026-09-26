@@ -3988,6 +3988,31 @@ class TestUpdateRulesExitStatus:
         assert exc.value.code == code
 
 
+class TestMinLevelOption:
+    def test_only_rules_at_the_level_or_above_run(self, tmp_path):
+        events = tmp_path / "events.json"
+        events.write_text('{"EventID": 1}\n')
+        ruleset = tmp_path / "rules.json"
+        ruleset.write_text(json.dumps([
+            {"title": "loud", "level": "high", "rule": ["SELECT * FROM logs WHERE EventID=1"]},
+            {"title": "quiet", "level": "low", "rule": ["SELECT * FROM logs WHERE EventID=1"]},
+        ]))
+        output = tmp_path / "out.json"
+        argv = ["zircolite.py", "-e", str(events), "-j", "-r", str(ruleset), "--min-level", "medium",
+                "-o", str(output), *get_log_arg(tmp_path)]
+
+        with patch("sys.argv", argv):
+            zircolite_script.main()
+
+        assert [result["title"] for result in json.loads(output.read_text())] == ["loud"]
+
+    def test_an_unknown_level_is_refused(self, tmp_path):
+        with patch("sys.argv", ["zircolite.py", "-e", str(tmp_path), "--min-level", "severe"]):
+            with pytest.raises(SystemExit) as exc:
+                zircolite_script.parse_arguments()
+        assert exc.value.code == 2
+
+
 class TestCorrelationRuleCount:
     def test_rules_removed_by_rulefilter_do_not_count(self):
         rules = [{"title": "burst", "correlation": True}, {"title": "noise", "correlation": True}, {"title": "plain"}]

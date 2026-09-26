@@ -1208,6 +1208,39 @@ class TestRulesUpdater:
                 mock_clean.assert_called_once()
 
 
+class TestMinimumLevel:
+    """--min-level replaces the _medium/_high ruleset variants the rules repository retired."""
+
+    RULES: ClassVar[list] = [
+        {"title": "crit", "level": "critical", "rule": ["SELECT * FROM logs WHERE a=1"]},
+        {"title": "high", "level": "High", "rule": ["SELECT * FROM logs WHERE a=2"]},
+        {"title": "medium", "level": "medium", "rule": ["SELECT * FROM logs WHERE a=3"]},
+        {"title": "low", "level": "low", "rule": ["SELECT * FROM logs WHERE a=4"]},
+        {"title": "unrated", "rule": ["SELECT * FROM logs WHERE a=5"]},
+    ]
+
+    def _titles(self, tmp_path, test_logger, level):
+        path = tmp_path / "rules.json"
+        path.write_text(json.dumps(self.RULES))
+        handler = RulesetHandler(RulesetConfig(ruleset=[str(path)], min_level=level), logger=test_logger)
+        return sorted(rule["title"] for rule in handler.rulesets)
+
+    @pytest.mark.parametrize("level,expected", [
+        (None, ["crit", "high", "low", "medium", "unrated"]),
+        ("informational", ["crit", "high", "low", "medium", "unrated"]),
+        ("medium", ["crit", "high", "medium"]),
+        ("high", ["crit", "high"]),
+        ("critical", ["crit"]),
+    ])
+    def test_rules_below_the_level_are_left_out(self, tmp_path, test_logger, level, expected):
+        assert self._titles(tmp_path, test_logger, level) == expected
+
+    def test_the_count_left_out_is_reported(self, tmp_path, test_logger):
+        with patch.object(test_logger, "info") as mock_info:
+            self._titles(tmp_path, test_logger, "high")
+        assert "3 rule(s) below level high left out" in " ".join(str(c) for c in mock_info.call_args_list)
+
+
 class TestRulesetHandlerInitBranches:
     """Tests for RulesetHandler __init__ branches that are often uncovered."""
 

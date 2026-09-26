@@ -40,7 +40,7 @@ from sigma.plugins import InstalledSigmaPlugins
 from sigma.processing.resolver import ProcessingPipelineResolver
 
 from .assets import bundled_dir
-from .config import RulesetConfig
+from .config import RULE_LEVELS, RulesetConfig
 
 # Rich console for styled output
 from .console import console, is_quiet, literal, make_file_link
@@ -52,6 +52,11 @@ from .utils import random_suffix, safe_load_all
 # SQLite backend 2) adds required_fields, result_type and correlation plans;
 # rulesets without a schema_version are version 1.
 RULESET_SCHEMA_VERSION = 2
+
+
+def _level_rank(rule: dict[str, Any]) -> int:
+    level = str(rule.get("level") or "").lower()
+    return RULE_LEVELS.index(level) if level in RULE_LEVELS else 0
 
 
 def _referenced_names(rule: SigmaCorrelationRule) -> list[str]:
@@ -718,6 +723,7 @@ class RulesetHandler:
         self.rulesetPathList = cfg.ruleset
         self.time_field = cfg.time_field
         self.timestamp_format = cfg.timestamp_format
+        self.min_level = cfg.min_level
         # The native Sigma paths converted in this run, if any
         self.yaml_paths: list[Path] = []
         self.pipelines = []
@@ -752,6 +758,8 @@ class RulesetHandler:
         self.rulesets = [
             item for sub_ruleset in raw_rulesets if sub_ruleset for item in sub_ruleset
         ]
+        if self.min_level is not None:
+            self.rulesets = self._at_or_above(self.rulesets, self.min_level)
 
         # Sort by level FIRST so that, among duplicates sharing the same SQL,
         # the surviving rule is the highest-severity one (stable sort keeps
@@ -807,6 +815,14 @@ class RulesetHandler:
                     self.logger.info(
                         f"[+] Event filter enabled: [cyan]{stats['eventids_count']}[/] eventIDs"
                     )
+
+    def _at_or_above(self, rules: list[dict[str, Any]], level: str) -> list[dict[str, Any]]:
+        """The rules at *level* or above; a rule without a known level counts as informational."""
+        floor = RULE_LEVELS.index(level)
+        kept = [rule for rule in rules if _level_rank(rule) >= floor]
+        if len(kept) < len(rules):
+            self.logger.info(f"[+] {len(rules) - len(kept)} rule(s) below level {level} left out")
+        return kept
 
     def _report_unrunnable_plans(self) -> None:
         """Say once, at load time, which correlation plans cannot run here.

@@ -400,6 +400,15 @@ class TestConfigLoaderValidate:
 
         assert any("timestamp_format" in issue for issue in issues) is not valid
 
+    @pytest.mark.parametrize("value,valid", [("high", True), (None, True), ("severe", False)])
+    def test_validate_min_level(self, test_logger, value, valid):
+        config = ZircoliteConfig()
+        config.rules.min_level = value
+
+        issues = ConfigLoader(logger=test_logger).validate_config(config)
+
+        assert any("min_level" in issue for issue in issues) is not valid
+
     def test_validate_csv_with_multiple_rulesets(self, tmp_path, test_logger):
         """Test validation warns about CSV with multiple rulesets."""
         # Create ruleset files

@@ -346,6 +346,7 @@ unless `--fileext` or `--file-pattern` says otherwise.
 | `-p`, `--pipeline` | Use a pySigma pipeline; repeatable. A name that is not installed exits `2` |
 | `-pl`, `--pipeline-list` | List installed pipelines and exit |
 | `--timestamp-format` | How the time field is written, for correlation rules converted from YAML: `iso` (default), `unix`, `unix_ms` or `unix_us`. See [Sigma correlation rules](#sigma-correlation-rules) |
+| `--min-level` | Load only the rules at this level or above: `informational`, `low`, `medium`, `high` or `critical`. A rule without a level counts as `informational` |
 | `-R`, `--rulefilter` | Skip rules whose title contains this text (case-sensitive); repeatable |
 | `--test-rules` | JSON file of rule test cases; validate and exit |
 

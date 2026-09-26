@@ -85,6 +85,7 @@ from zircolite.assets import (
     resolve_shipped_ruleset,
     resolve_shipped_template,
 )
+from zircolite.config import RULE_LEVELS
 from zircolite.console import literal
 from zircolite.correlations import TIMESTAMP_FORMATS
 
@@ -163,6 +164,7 @@ def parse_arguments() -> argparse.Namespace:
     rulesets_formats_args.add_argument("-p", "--pipeline", help="Use specified pipeline for native Sigma rulesets (YAML). Examples: 'sysmon', 'windows-logsources', 'windows-audit'. Use '--pipeline-list' to see available pipelines.", action='append', nargs='+')
     rulesets_formats_args.add_argument("--timestamp-format", choices=TIMESTAMP_FORMATS, default=None, help=f"How the time field is written, for correlation rules converted from native Sigma rulesets (YAML): ISO 8601 (iso) or Unix seconds, milliseconds or microseconds (default: {DEFAULTS['timestamp_format']}). Compiled JSON rulesets keep the format they were converted with")
     rulesets_formats_args.add_argument("-pl", "--pipeline-list", help="List all installed pysigma pipelines", action='store_true')
+    rulesets_formats_args.add_argument("--min-level", choices=RULE_LEVELS, default=None, help="Load only the rules at this level or above; a rule without a level counts as informational")
     rulesets_formats_args.add_argument("-R", "--rulefilter", help="Remove rules from ruleset by matching rule title (case sensitive)", action='append', nargs='*')
     rulesets_formats_args.add_argument("--test-rules", help="JSON file with rule test cases (true-positive / true-negative events per rule)", type=str, metavar="TEST_FILE")
 
@@ -1326,6 +1328,7 @@ def _main(memory_tracker, start_time) -> None:
         save_ruleset=args.save_ruleset,
         time_field=args.timefield,
         timestamp_format=args.timestamp_format,
+        min_level=args.min_level,
     )
     try:
         if not is_quiet():
