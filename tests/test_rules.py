@@ -10,6 +10,7 @@ import subprocess
 import sys
 from contextlib import closing
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -19,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from zircolite import ProcessingConfig, ZircoliteCore
 from zircolite.config import RulesetConfig
-from zircolite.rules import RulesetHandler, RulesUpdater, UnknownPipelineError
+from zircolite.rules import RulesetHandler, RulesUpdateError, RulesUpdater, UnknownPipelineError
 from zircolite.sqlscan import rebalance_sql
 
 WORKSPACE_ROOT = Path(__file__).parent.parent
@@ -1016,57 +1017,139 @@ class TestRulesUpdater:
                 updater.run()
                 mock_clean.assert_called_once()
 
-    def test_checkIfNewerAndMove_new_files(self, test_logger, tmp_path):
-        """checkIfNewerAndMove moves new JSON rulesets to the rules directory."""
-        # Set up temp dir with a JSON ruleset
-        tmp_dir = tmp_path / "tmp-rules-dir"
-        tmp_dir.mkdir()
-        ruleset = tmp_dir / "test_rules.json"
-        ruleset.write_text('[{"title": "New Rule"}]')
+    @staticmethod
+    def _release(tmp_path, files, *, manifest=True, statuses=None):
+        """An unpacked branch archive: one top folder holding the repository."""
+        import hashlib
 
-        # Create the rules dir (empty)
-        rules_dir = tmp_path / "rules"
-        rules_dir.mkdir()
+        root = tmp_path / "unpacked" / "Zircolite-Rules-v2-main"
+        for name, content in files.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        if manifest:
+            artifacts = {
+                name: hashlib.sha256(content.encode()).hexdigest()
+                for name, content in files.items()
+                if not name.startswith(("reports/", "tests/")) and name != "sources.json"
+            }
+            sources = {"sigmahq": {"artifacts": artifacts, "status": "current", "revision": "a" * 40}}
+            for name, status in (statuses or {}).items():
+                sources[name] = {"artifacts": {}, "status": status, "revision": "b" * 40,
+                                 "last_success": "2026-09-01T00:00:00+00:00"}
+            (root / "release-manifest.json").write_text(json.dumps({"schema_version": 1, "sources": sources}))
+        return tmp_path / "unpacked"
 
-        updater = RulesUpdater(logger=test_logger, rules_dir=rules_dir)
-        updater.tmpDir = str(tmp_dir)
-        updater.checkIfNewerAndMove()
+    FILES: ClassVar[dict] = {
+        "rules_windows_merged.json": '[{"title": "Merged"}]',
+        "rules_tsale_windows_merged.json": '[{"title": "Community"}]',
+        "experimental/rules_x_correlation.json": '[{"title": "Correlation"}]',
+        "licenses/tsale.txt": "GPL",
+        "provenance/tsale.json": "{}",
+        "reports/tsale.json": "{}",
+        "sources.json": "{}",
+        "tests/fixture.json": "{}",
+    }
 
-        assert (rules_dir / "test_rules.json").exists()
-        assert "test_rules.json" in str(updater.updated_rulesets[0])
+    def _install(self, test_logger, tmp_path, unpacked, rules_dir=None):
+        updater = RulesUpdater(logger=test_logger, rules_dir=rules_dir or tmp_path / "rules")
+        updater.tmpDir = str(unpacked)
+        updater.install()
+        return updater
 
-    def test_checkIfNewerAndMove_same_hash_skipped(self, test_logger, tmp_path):
-        """checkIfNewerAndMove skips files with identical hashes."""
-        content = '[{"title": "Same Rule"}]'
+    def test_rulesets_and_licences_are_installed_nothing_else(self, test_logger, tmp_path):
+        updater = self._install(test_logger, tmp_path, self._release(tmp_path, self.FILES))
 
-        # Set up temp dir with a JSON ruleset
-        tmp_dir = tmp_path / "tmp-rules-dir"
-        tmp_dir.mkdir()
-        (tmp_dir / "test_rules.json").write_text(content)
+        installed = sorted(p.relative_to(tmp_path / "rules").as_posix()
+                           for p in (tmp_path / "rules").rglob("*") if p.is_file())
+        assert installed == [
+            "experimental/rules_x_correlation.json",
+            "licenses/tsale.txt",
+            "rules_tsale_windows_merged.json",
+            "rules_windows_merged.json",
+        ]
+        assert len(updater.updated_rulesets) == 4
 
-        # Create the rules dir with identical file
-        rules_dir = tmp_path / "rules"
-        rules_dir.mkdir()
-        (rules_dir / "test_rules.json").write_text(content)
+    def test_unchanged_files_are_left_alone(self, test_logger, tmp_path):
+        self._install(test_logger, tmp_path, self._release(tmp_path, self.FILES))
+        again = tmp_path / "again"
+        again.mkdir()
 
-        updater = RulesUpdater(logger=test_logger, rules_dir=rules_dir)
-        updater.tmpDir = str(tmp_dir)
-        updater.checkIfNewerAndMove()
+        updater = self._install(test_logger, again, self._release(again, self.FILES), rules_dir=tmp_path / "rules")
 
-        assert len(updater.updated_rulesets) == 0
+        assert updater.updated_rulesets == []
 
-    def test_checkIfNewerAndMove_creates_rules_dir(self, test_logger, tmp_path):
-        """checkIfNewerAndMove creates the rules directory if it doesn't exist."""
-        tmp_dir = tmp_path / "tmp-rules-dir"
-        tmp_dir.mkdir()
-        (tmp_dir / "new.json").write_text("[]")
+    def test_a_file_that_differs_from_the_manifest_installs_nothing(self, test_logger, tmp_path):
+        unpacked = self._release(tmp_path, self.FILES)
+        (unpacked / "Zircolite-Rules-v2-main" / "rules_tsale_windows_merged.json").write_text("[]")
 
-        rules_dir = tmp_path / "rules"
-        updater = RulesUpdater(logger=test_logger, rules_dir=rules_dir)
-        updater.tmpDir = str(tmp_dir)
-        updater.checkIfNewerAndMove()
+        with pytest.raises(RulesUpdateError, match="do not match"):
+            self._install(test_logger, tmp_path, unpacked)
+        assert not (tmp_path / "rules").exists() or not any((tmp_path / "rules").iterdir())
 
-        assert rules_dir.is_dir()
+    def test_a_ruleset_the_manifest_does_not_name_installs_nothing(self, test_logger, tmp_path):
+        unpacked = self._release(tmp_path, self.FILES)
+        (unpacked / "Zircolite-Rules-v2-main" / "rules_extra.json").write_text("[]")
+
+        with pytest.raises(RulesUpdateError, match=r"rules_extra\.json"):
+            self._install(test_logger, tmp_path, unpacked)
+
+    def test_a_listed_file_missing_from_the_archive_installs_nothing(self, test_logger, tmp_path):
+        unpacked = self._release(tmp_path, self.FILES)
+        (unpacked / "Zircolite-Rules-v2-main" / "licenses" / "tsale.txt").unlink()
+
+        with pytest.raises(RulesUpdateError, match="missing"):
+            self._install(test_logger, tmp_path, unpacked)
+
+    def test_a_newer_manifest_asks_for_a_newer_zircolite(self, test_logger, tmp_path):
+        unpacked = self._release(tmp_path, self.FILES)
+        (unpacked / "Zircolite-Rules-v2-main" / "release-manifest.json").write_text('{"schema_version": 2}')
+
+        with pytest.raises(RulesUpdateError, match="update Zircolite"):
+            self._install(test_logger, tmp_path, unpacked)
+
+    def test_stale_and_unavailable_sources_are_reported(self, test_logger, tmp_path, caplog):
+        unpacked = self._release(tmp_path, self.FILES, statuses={"hayabusa": "stale", "joesecurity": "unavailable"})
+
+        with caplog.at_level("WARNING"):
+            self._install(test_logger, tmp_path, unpacked)
+
+        assert "hayabusa: its latest update failed" in caplog.text
+        assert "bbbbbbbbbbbb" in caplog.text
+        assert "joesecurity: no rulesets are published" in caplog.text
+
+    def test_a_release_without_a_manifest_installs_its_top_level_rulesets(self, test_logger, tmp_path, caplog):
+        unpacked = self._release(tmp_path, self.FILES, manifest=False)
+
+        with caplog.at_level("WARNING"):
+            updater = self._install(test_logger, tmp_path, unpacked)
+
+        assert sorted(Path(p).name for p in updater.updated_rulesets) == [
+            "rules_tsale_windows_merged.json", "rules_windows_merged.json"]
+        assert "unverified" in caplog.text
+
+    def test_run_installs_from_a_downloaded_archive(self, test_logger, tmp_path):
+        import shutil as _shutil
+
+        unpacked = self._release(tmp_path, self.FILES)
+        archive = _shutil.make_archive(str(tmp_path / "branch"), "zip", unpacked)
+        updater = RulesUpdater(logger=test_logger, rules_dir=tmp_path / "rules")
+        updater.tempFile = str(tmp_path / "download.zip")
+        updater.tmpDir = str(tmp_path / "extracted")
+
+        with patch.object(RulesUpdater, "download", lambda self: _shutil.copy(archive, self.tempFile)):
+            assert updater.run() is True
+
+        assert (tmp_path / "rules" / "experimental" / "rules_x_correlation.json").is_file()
+        assert not Path(updater.tempFile).exists() and not Path(updater.tmpDir).exists()
+
+    def test_run_reports_a_refused_release(self, test_logger, tmp_path):
+        with patch.object(RulesUpdater, "download"), patch.object(RulesUpdater, "unzip"), \
+                patch.object(RulesUpdater, "install", side_effect=RulesUpdateError("files do not match")):
+            updater = RulesUpdater(logger=test_logger, rules_dir=tmp_path / "rules")
+            with patch.object(test_logger, "error") as mock_error:
+                assert updater.run() is False
+        assert "Rulesets not updated" in str(mock_error.call_args)
 
     def test_rules_are_installed_where_a_run_will_look_for_them(self, test_logger, tmp_path, monkeypatch):
         """-U used to write ./rules, which a run from anywhere else never reads."""

@@ -436,8 +436,25 @@ class EventFilter:
         }
 
 
+class RulesUpdateError(Exception):
+    """The downloaded rules release cannot be installed as it stands."""
+
+
 class RulesUpdater:
-    """Download rulesets from the https://github.com/wagga40/Zircolite-Rules-v2 repository and update if necessary."""
+    """Install the rulesets published by the Zircolite-Rules-v2 repository.
+
+    The repository publishes a release manifest naming every artifact with its
+    SHA-256. The rulesets -- ``rules_*.json`` and ``experimental/*.json`` -- and
+    the licence texts of their sources are installed; reports, provenance and
+    the repository's own tests are not. Every file is checked against the
+    manifest before any is installed, and one that fails leaves ``rules/`` as
+    it was. The manifest arrives in the same archive, so this proves the
+    download complete and consistent, not who published it.
+    """
+
+    url = "https://github.com/wagga40/Zircolite-Rules-v2/archive/refs/heads/main.zip"
+    manifest_name = "release-manifest.json"
+    manifest_version = 1
 
     def __init__(
         self,
@@ -452,7 +469,6 @@ class RulesUpdater:
             logger: Logger instance (creates default if None)
             rules_dir: Where to install rulesets (resolved from the install if None)
         """
-        self.url = "https://github.com/wagga40/Zircolite-Rules-v2/archive/refs/heads/main.zip"
         self.logger = logger or logging.getLogger(__name__)
         self.tempFile = f'tmp-rules-{random_suffix(4)}.zip'
         self.tmpDir = f'tmp-rules-{random_suffix(4)}'
@@ -503,33 +519,118 @@ class RulesUpdater:
     def unzip(self) -> None:
         shutil.unpack_archive(self.tempFile, self.tmpDir, "zip")
 
-    def checkIfNewerAndMove(self) -> None:
-        count = 0
+    def _release_root(self) -> Path:
+        """The repository's top directory inside the unpacked archive.
+
+        GitHub wraps a branch archive in one folder (``Zircolite-Rules-v2-main/``).
+        """
+        root = Path(self.tmpDir)
+        entries = list(root.iterdir())
+        if len(entries) == 1 and entries[0].is_dir():
+            return entries[0]
+        return root
+
+    @staticmethod
+    def _sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with open(path, 'rb') as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _read_manifest(self, root: Path) -> dict[str, Any] | None:
+        path = root / self.manifest_name
+        if not path.is_file():
+            return None
+        try:
+            manifest = json.loads(path.read_bytes())
+        except json.JSONDecodeError as e:
+            raise RulesUpdateError(f"{self.manifest_name} is not valid JSON: {e}") from e
+        version = manifest.get("schema_version") if isinstance(manifest, dict) else None
+        if version != self.manifest_version:
+            raise RulesUpdateError(
+                f"{self.manifest_name} uses schema version {version!r}, which this "
+                "Zircolite does not read: update Zircolite"
+            )
+        if not isinstance(manifest.get("sources"), dict):
+            raise RulesUpdateError(f"{self.manifest_name} lists no sources")
+        return manifest
+
+    def _report_sources(self, manifest: dict[str, Any]) -> None:
+        """Warn about sources whose rulesets are not the current ones."""
+        for name, source in sorted(manifest["sources"].items()):
+            status = source.get("status") if isinstance(source, dict) else None
+            if status == "stale":
+                revision = str(source.get("revision") or "unknown")[:12]
+                self.logger.warning(
+                    f"[yellow]    [!] {literal(name)}: its latest update failed; its rulesets are "
+                    f"from revision {literal(revision)}, generated {literal(source.get('last_success', 'at an unknown date'))}[/]"
+                )
+            elif status == "unavailable":
+                self.logger.warning(f"[yellow]    [!] {literal(name)}: no rulesets are published[/]")
+
+    def _selection(self, root: Path, manifest: dict[str, Any] | None) -> list[tuple[str, str | None]]:
+        """(relative path, expected SHA-256) of every file to install.
+
+        Raises RulesUpdateError when the archive and its manifest disagree.
+        """
+        rulesets = [p.relative_to(root).as_posix() for p in sorted(root.glob("rules_*.json"))]
+        if manifest is None:
+            # A release made before the manifest existed: its rulesets only, unverified.
+            return [(name, None) for name in rulesets]
+        rulesets += [p.relative_to(root).as_posix() for p in sorted(root.glob("experimental/*.json"))]
+        published: dict[str, str] = {}
+        for source in manifest["sources"].values():
+            if isinstance(source, dict) and isinstance(source.get("artifacts"), dict):
+                published.update(source["artifacts"])
+
+        unlisted = [name for name in rulesets if name not in published]
+        if unlisted:
+            raise RulesUpdateError(f"rulesets missing from {self.manifest_name}: {', '.join(unlisted)}")
+        wanted = [
+            name for name in published
+            if (name.startswith("rules_") and "/" not in name)
+            or name.startswith(("experimental/", "licenses/"))
+        ]
+        absent = [name for name in wanted if not (root / name).is_file()]
+        if absent:
+            raise RulesUpdateError(f"files listed in {self.manifest_name} are missing: {', '.join(absent)}")
+        mismatched = [name for name in wanted if self._sha256(root / name) != published[name]]
+        if mismatched:
+            raise RulesUpdateError(f"files do not match {self.manifest_name}: {', '.join(mismatched)}")
+        return [(name, published[name]) for name in sorted(wanted)]
+
+    def install(self) -> None:
+        """Check the unpacked release, then install the files that changed."""
+        root = self._release_root()
+        manifest = self._read_manifest(root)
+        if manifest is None:
+            self.logger.warning(
+                f"[yellow]    [!] The rules repository publishes no {self.manifest_name}: "
+                "installing its top-level rulesets unverified[/]"
+            )
+        else:
+            self._report_sources(manifest)
+        selection = self._selection(root, manifest)
+        if not any(name.endswith(".json") for name, _ in selection):
+            raise RulesUpdateError("the downloaded archive holds no rulesets")
+
         rules_dir = Path(self.rules_dir)
         rules_dir.mkdir(parents=True, exist_ok=True)
-
-        for ruleset in Path(self.tmpDir).rglob("*.json"):
-            with open(ruleset, 'rb') as f:
-                hash_new = hashlib.md5(f.read(), usedforsecurity=False).hexdigest()
-
-            # Preserve the archive's relative directory structure so same-named
-            # rulesets in different subdirectories do not overwrite each other
-            rel_path = ruleset.relative_to(Path(self.tmpDir))
-            # Drop the archive's top-level folder (e.g. Zircolite-Rules-v2-main/)
-            parts = rel_path.parts[1:] if len(rel_path.parts) > 1 else rel_path.parts
-            dest_file = rules_dir.joinpath(*parts)
-            hash_old = ""
-
-            if dest_file.is_file():
-                with open(dest_file, 'rb') as f:
-                    hash_old = hashlib.md5(f.read(), usedforsecurity=False).hexdigest()
-
-            if hash_new != hash_old:
-                count += 1
-                dest_file.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(ruleset, dest_file)
-                self.updated_rulesets.append(str(dest_file))
-                self.logger.info(f"    [>] Updated : {make_file_link(str(dest_file))}")
+        count = 0
+        for name, digest in selection:
+            source = root / name
+            destination = rules_dir.joinpath(*name.split("/"))
+            if destination.is_file() and self._sha256(destination) == (digest or self._sha256(source)):
+                continue
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(source, destination)
+            count += 1
+            self.updated_rulesets.append(str(destination))
+            if name.endswith(".json"):
+                self.logger.info(f"    [>] Updated : {make_file_link(str(destination))}")
+            else:
+                self.logger.debug(f"    [>] Updated : {destination}")
 
         if count == 0:
             self.logger.info("[cyan]    [>] No newer rulesets found")
@@ -540,21 +641,26 @@ class RulesUpdater:
         if Path(self.tmpDir).exists():
             shutil.rmtree(self.tmpDir)
 
-    def run(self) -> None:
+    def run(self) -> bool:
+        """Download, check and install; False when nothing could be installed."""
         try:
             self.download()
             self.unzip()
-            self.checkIfNewerAndMove()
+            self.install()
+            return True
         except requests.exceptions.ConnectionError as e:
             self.logger.error(f"    [-] Network connection failed: {literal(e)}")
         except requests.exceptions.Timeout:
             self.logger.error(f"    [-] Download timed out after 30s: {self.url}")
         except requests.exceptions.HTTPError as e:
             self.logger.error(f"    [-] Server returned an error: {literal(e)}")
+        except RulesUpdateError as e:
+            self.logger.error(f"    [-] Rulesets not updated: {literal(e)}")
         except Exception as e:
             self.logger.error(f"    [-] {literal(e)}")
         finally:
             self.clean()
+        return False
 
 
 def pipeline_install_hint() -> str:

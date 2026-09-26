@@ -1220,8 +1220,9 @@ def _main(memory_tracker, start_time) -> None:
     if args.update_rules:
         updater = RulesUpdater(logger=logger)
         logger.info(f"[+] Updating rules in {make_file_link(str(updater.rules_dir))}")
-        updater.run()
-        sys.exit(0)
+        # A failed update must fail the command: an image build that runs -U
+        # would otherwise ship the rulesets it already had.
+        sys.exit(0 if updater.run() else 1)
 
     # A relative --config names a file shipped in config/, so it has to resolve
     # from the install as well as from the working directory -- the default is

@@ -41,6 +41,10 @@ TARGETS = ("linux-x64", "linux-arm64", "macos-arm64", "windows-x64", "windows-ar
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VENDORED_LICENCES = Path(__file__).resolve().parent / "licenses"
 RULES_LICENCE = "DRL-1.1.txt"
+# The SigmaHQ rulesets, the only ones under the DRL. -U also installs community
+# rulesets under other licences, their licence texts and experimental/ into
+# rules/, and the release would ship them all as DRL.
+SIGMAHQ_RULESET = re.compile(r"rules_(windows_(sysmon|generic|merged)|linux)(_medium|_high)?\.json")
 # CPython's LICENSE.txt appends these libraries' notices on Windows only.
 RUNTIME_LIBRARIES_LICENCE = "python-runtime-libraries.txt"
 
@@ -456,6 +460,13 @@ def stage(root: Path, version: str, target: str) -> Path:
             "symlinks cannot be extracted from the Windows archives, so none is packaged "
             "for any target; replace each with the file it points to: "
             + ", ".join(link.relative_to(root).as_posix() for link in links))
+    for rules in (root / "rules", onedir / "_internal" / "rules"):
+        foreign = foreign_rules(rules)
+        if foreign:
+            raise PackagingError(
+                f"{rules} holds files the release would ship under the DRL but that are not "
+                f"SigmaHQ rulesets (-U installs community rulesets there); remove them: "
+                + ", ".join(foreign))
     # Before anything is copied, so a gap in the notices leaves no half-built tree.
     notices = third_party_licences(version, target)
 
@@ -470,6 +481,19 @@ def stage(root: Path, version: str, target: str) -> Path:
         shutil.copy2(root / name, staging / name)
     (staging / "THIRD_PARTY_LICENSES").write_text(notices, encoding="utf-8", newline="\n")
     return staging
+
+
+def foreign_rules(directory: Path) -> list[str]:
+    """Files in a rules/ directory that are neither SigmaHQ rulesets nor its README."""
+    if not directory.is_dir():
+        return []
+    return sorted(
+        path.relative_to(directory).as_posix()
+        for path in directory.rglob("*")
+        if path.is_file() and path.name != ".DS_Store" and "__pycache__" not in path.parts
+        and not (path.parent == directory
+                 and (path.name == "README.md" or SIGMAHQ_RULESET.fullmatch(path.name)))
+    )
 
 
 def walk(directory: Path) -> Iterator[Path]:

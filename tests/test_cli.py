@@ -3976,6 +3976,18 @@ class TestTimestampFormatOption:
         assert "--timestamp-format only applies" in (tmp_path / "test.log").read_text()
 
 
+class TestUpdateRulesExitStatus:
+    @pytest.mark.parametrize("installed,code", [(True, 0), (False, 1)])
+    def test_a_failed_update_fails_the_command(self, installed, code):
+        """An image build running -U must not ship stale rulesets quietly."""
+        with patch("sys.argv", ["zircolite.py", "-U"]), \
+                patch.object(zircolite_script.RulesUpdater, "run", return_value=installed):
+            with pytest.raises(SystemExit) as exc:
+                zircolite_script.main()
+
+        assert exc.value.code == code
+
+
 class TestCorrelationRuleCount:
     def test_rules_removed_by_rulefilter_do_not_count(self):
         rules = [{"title": "burst", "correlation": True}, {"title": "noise", "correlation": True}, {"title": "plain"}]

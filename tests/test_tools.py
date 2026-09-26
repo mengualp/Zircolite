@@ -705,6 +705,30 @@ class TestPackageRefusals:
         assert code == 1 and printed == ""
         assert "symlink" in err and "Windows" in err
 
+    @pytest.mark.parametrize("stray", [
+        "rules/rules_tsale_windows_merged.json",
+        "rules/experimental/rules_x_correlation.json",
+        "rules/licenses/tsale.txt",
+        "dist/Zircolite/_internal/rules/rules_hayabusa_windows_native.json",
+    ])
+    def test_rulesets_under_another_licence_are_refused(self, release, checkout, stray,
+                                                        monkeypatch, capsys):
+        # The release declares the DRL for everything in rules/.
+        path = checkout / stray
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("[]", encoding="utf-8")
+        code, printed, err = package(release, checkout, "linux-x64", monkeypatch, capsys)
+        assert code == 1 and printed == ""
+        assert Path(stray).name in err
+        assert not list((checkout / "dist").glob("Zircolite-*"))
+
+    def test_the_sigmahq_rulesets_and_their_readme_are_packaged(self, release, checkout,
+                                                                monkeypatch, capsys):
+        for name in ["README.md", "rules_windows_merged.json", "rules_windows_sysmon_high.json"]:
+            (checkout / "rules" / name).write_text("[]", encoding="utf-8")
+        code, _, _ = package(release, checkout, "linux-x64", monkeypatch, capsys)
+        assert code == 0
+
     @pytest.mark.parametrize("value", [None, "", "linux-x86", "macos-x64"])
     def test_target_must_be_known(self, release, checkout, value, monkeypatch, capsys):
         if value is None:

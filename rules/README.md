@@ -32,7 +32,18 @@ These rulesets are generated from SIGMA rules using **pySigma** from the [offici
 - `rules_linux_high.json` — Level high and above from the **linux** directory
 - `rules_linux_medium.json` — Level medium and above from the **linux** directory
 
-**Zircolite can auto-update these rulesets with `-U` or `--update-rules`. Pre-built rules are available in [Zircolite-Rules-v2](https://github.com/wagga40/Zircolite-Rules-v2).**
+## Updating with `-U`
+
+`-U`/`--update-rules` installs everything [Zircolite-Rules-v2](https://github.com/wagga40/Zircolite-Rules-v2) publishes, into the `rules/` directory the next run reads:
+
+- the SigmaHQ rulesets above;
+- community rulesets kept apart from them, one file per source and profile: Hayabusa (`rules_hayabusa_*`, DRL 1.1), Joe Security (`rules_joesecurity_*`, GPL 3.0), Micah Babinski (`rules_mbabinski_*`, GPL 3.0), mdecrevoisier (`rules_mdecrevoisier_*`, CC0 1.0) and tsale (`rules_tsale_*`, GPL 3.0);
+- `experimental/` — Sigma correlation rulesets, run with `-r rules/experimental/<file>.json`;
+- `licenses/` — the licence text of every source.
+
+Each file is checked against the SHA-256 the repository's `release-manifest.json` lists for it, and a file that does not match leaves `rules/` untouched. A source whose last update failed keeps its previous rulesets and is reported as stale. Files `-U` no longer finds upstream are never deleted.
+
+Only the SigmaHQ rulesets are part of the Zircolite repository and its release archives; the community ones are fetched by `-U` and keep their own licences.
 
 ## Why you should make your own rulesets
 
