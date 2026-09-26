@@ -3606,15 +3606,9 @@ def test_version_has_a_single_source():
     taskfile = (WORKSPACE_ROOT / "Taskfile.yml").read_text(encoding="utf-8")
     assert "zircolite/__init__.py" in taskfile
 
-    # Tracked docs must not carry the literal either: docs/README.md did, and
-    # nothing here caught it, so it would silently drift at the next bump.
-    # pyproject.toml is exempt -- there the version *is* the package metadata.
-    for doc in ("docs/README.md", "README.md"):
-        path = WORKSPACE_ROOT / doc
-        if path.exists():
-            assert __version__ not in path.read_text(encoding="utf-8"), (
-                f"{doc} duplicates the version literal; reference it instead"
-            )
+    # Tracked docs must not carry the literal either; tests/test_docs_sync.py
+    # checks them. pyproject.toml is exempt -- there the version *is* the
+    # package metadata.
 
     result = subprocess.run(
         [sys.executable, str(WORKSPACE_ROOT / "zircolite.py"), "-v"],
