@@ -930,6 +930,8 @@ no longer published.
 `-U` installs everything the rules repository publishes for Zircolite:
 
 - the SigmaHQ rulesets above;
+- `rules_windows_all.json`, the Windows detections of SigmaHQ and every community source
+  combined, with duplicates removed;
 - community rulesets, one file per source and profile, kept apart from the SigmaHQ ones:
   Hayabusa (`rules_hayabusa_*`), Joe Security (`rules_joesecurity_*`), Micah Babinski
   (`rules_mbabinski_*`), mdecrevoisier (`rules_mdecrevoisier_*`) and tsale (`rules_tsale_*`).

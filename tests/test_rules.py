@@ -1070,6 +1070,23 @@ class TestRulesUpdater:
         ]
         assert len(updater.updated_rulesets) == 4
 
+    def test_a_ruleset_combining_several_sources_is_installed(self, test_logger, tmp_path):
+        """rules_windows_all.json is listed under the manifest's aggregates, not a source."""
+        import hashlib
+
+        unpacked = self._release(tmp_path, self.FILES)
+        root = unpacked / "Zircolite-Rules-v2-main"
+        (root / "rules_windows_all.json").write_text("[]")
+        manifest = json.loads((root / "release-manifest.json").read_text())
+        manifest["aggregates"] = {"windows_all": {"status": "current", "artifacts": {
+            "rules_windows_all.json": hashlib.sha256(b"[]").hexdigest()}}}
+        (root / "release-manifest.json").write_text(json.dumps(manifest))
+
+        updater = self._install(test_logger, tmp_path, unpacked)
+
+        assert (tmp_path / "rules" / "rules_windows_all.json").is_file()
+        assert len(updater.updated_rulesets) == 5
+
     def test_unchanged_files_are_left_alone(self, test_logger, tmp_path):
         self._install(test_logger, tmp_path, self._release(tmp_path, self.FILES))
         again = tmp_path / "again"

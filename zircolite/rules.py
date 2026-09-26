@@ -569,7 +569,7 @@ class RulesUpdater:
                 revision = str(source.get("revision") or "unknown")[:12]
                 self.logger.warning(
                     f"[yellow]    [!] {literal(name)}: its latest update failed; its rulesets are "
-                    f"from revision {literal(revision)}, generated {literal(source.get('last_success', 'at an unknown date'))}[/]"
+                    f"from revision {literal(revision)}, generated {literal(source.get('last_success') or 'at an unknown date')}[/]"
                 )
             elif status == "unavailable":
                 self.logger.warning(f"[yellow]    [!] {literal(name)}: no rulesets are published[/]")
@@ -584,10 +584,13 @@ class RulesUpdater:
             # A release made before the manifest existed: its rulesets only, unverified.
             return [(name, None) for name in rulesets]
         rulesets += [p.relative_to(root).as_posix() for p in sorted(root.glob("experimental/*.json"))]
+        # Sources publish their own rulesets; aggregates combine several of
+        # them (rules_windows_all.json).
         published: dict[str, str] = {}
-        for source in manifest["sources"].values():
-            if isinstance(source, dict) and isinstance(source.get("artifacts"), dict):
-                published.update(source["artifacts"])
+        for entries in (manifest["sources"], manifest.get("aggregates") or {}):
+            for entry in entries.values() if isinstance(entries, dict) else ():
+                if isinstance(entry, dict) and isinstance(entry.get("artifacts"), dict):
+                    published.update(entry["artifacts"])
 
         unlisted = [name for name in rulesets if name not in published]
         if unlisted:
