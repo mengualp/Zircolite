@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -33,10 +34,10 @@ from rich.progress import (
 )
 from sigma.backends.sqlite import sqlite
 from sigma.collection import SigmaCollection
-from sigma.correlations import SigmaCorrelationRule
+from sigma.correlations import SigmaCorrelationRule, SigmaExtendedCorrelationCondition
+from sigma.exceptions import SigmaRuleLocation, SigmaRuleNotFoundError
 from sigma.plugins import InstalledSigmaPlugins
 from sigma.processing.resolver import ProcessingPipelineResolver
-from sigma.rule import SigmaRule
 
 from .assets import bundled_dir
 from .config import RulesetConfig
@@ -51,6 +52,22 @@ from .utils import random_suffix, safe_load_all
 # SQLite backend 2) adds required_fields, result_type and correlation plans;
 # rulesets without a schema_version are version 1.
 RULESET_SCHEMA_VERSION = 2
+
+
+def _referenced_names(rule: SigmaCorrelationRule) -> list[str]:
+    """The rule names or ids a correlation refers to, as written."""
+    if rule.rules is not None:
+        return [reference.reference for reference in rule.rules]
+    if isinstance(rule.condition, SigmaExtendedCorrelationCondition):
+        return list(rule.condition.get_referenced_rules())
+    return []
+
+
+def _rule_path(rule: Any) -> str | None:
+    """The file a Sigma rule was loaded from, if pySigma recorded it."""
+    source = getattr(rule, "source", None)
+    path = getattr(source, "path", None)
+    return str(path) if path is not None else None
 
 
 def ruleset_format_problem(rules: list[dict[str, Any]]) -> str | None:
@@ -723,7 +740,7 @@ class RulesetHandler:
         return None
 
     def is_valid_sigma_rule(self, filepath: Path) -> bool:
-        """Check if a YAML file contains at least one valid Sigma or correlation rule."""
+        """Check if a YAML file contains at least one Sigma rule, correlation or filter."""
         try:
             with open(filepath, encoding="utf-8") as file:
                 for doc in safe_load_all(file):
@@ -733,7 +750,8 @@ class RulesetHandler:
                         f in doc for f in ("title", "logsource", "detection")
                     )
                     has_correlation = "title" in doc and "correlation" in doc
-                    if has_standard or has_correlation:
+                    has_filter = all(f in doc for f in ("title", "logsource", "filter"))
+                    if has_standard or has_correlation or has_filter:
                         return True
         except Exception:
             pass
@@ -794,119 +812,182 @@ class RulesetHandler:
             self.logger.debug(f"[red]    [-] Cannot convert correlation rule '{title}' : {e}[/]")
             return None
 
+    def _sigma_backend(self, pipelines: list[Any]) -> Any:
+        """The SQLite backend, with the pipelines applied in the order given."""
+        pipeline_resolver = ProcessingPipelineResolver()
+        # Preserve user order: pySigma's resolve() sorts by (priority, path).
+        # When priorities are equal it uses pipeline name, so e.g. "Add Channel..."
+        # runs before "Generic Log Sources..." and Channel is never set for Sysmon.
+        # Temporarily set priority to index so user order is respected.
+        original_priorities = [p.priority for p in pipelines]
+        try:
+            for i, pipeline in enumerate(pipelines):
+                pipeline.priority = i
+            for pipeline in pipelines:
+                pipeline_resolver.add_pipeline_class(pipeline)
+            # Resolve using pipeline names in user order (lower priority = earlier)
+            combined_pipeline = pipeline_resolver.resolve([p.name for p in pipelines])
+        finally:
+            for pipeline, orig in zip(pipelines, original_priorities, strict=True):
+                pipeline.priority = orig
+        # row_id is the logs table's integer primary key: correlation evidence
+        # names events by it.
+        backend = sqlite.sqliteBackend(
+            combined_pipeline, timestamp_field=self.time_field, event_id_field="row_id"
+        )
+        backend.init_processing_pipeline("zircolite")
+        return backend
+
+    def _resolve_references(self, merged: SigmaCollection) -> SigmaCollection:
+        """Resolve correlation references, dropping only the correlations that cannot be.
+
+        pySigma resolves a whole collection at once, and one correlation naming
+        a rule nobody loaded fails it -- every rule of every path with it. A
+        correlation that depends on a dropped one is dropped in turn.
+        """
+        rules: list[Any] = list(merged.rules)
+        while True:
+            # Filters were applied when the paths were merged; none are passed again.
+            collection = SigmaCollection(init_rules=rules, resolve_references=False)
+            broken: dict[int, tuple[Any, str]] = {}
+            for rule in collection.rules:
+                if not isinstance(rule, SigmaCorrelationRule):
+                    continue
+                for name in _referenced_names(rule):
+                    try:
+                        collection[name]
+                    except SigmaRuleNotFoundError:
+                        broken[id(rule)] = (rule, name)
+                        break
+            if not broken:
+                break
+            for rule, name in broken.values():
+                self.logger.error(
+                    f"[red]    [-] Correlation '{literal(rule.title)}' ({literal(_rule_path(rule) or 'unknown file')}) "
+                    f"references '{literal(name)}', which no loaded rule defines: skipped[/]"
+                )
+            rules = [rule for rule in rules if id(rule) not in broken]
+        collection.resolve_rule_references()
+        return collection
+
     def sigma_rules_to_ruleset(
-        self, sigma_rules_list: list[Path | str], pipelines: list[Any]
+        self, sigma_rules_list: Sequence[Path | str], pipelines: list[Any]
     ) -> list[dict[str, Any]]:
-        """Convert Sigma rules to Zircolite ruleset format."""
-        combined_ruleset: list[dict[str, Any]] = []
+        """Convert Sigma rules to Zircolite ruleset format.
 
-        for sigma_rules in sigma_rules_list:
-            # Create the pipeline resolver
-            pipeline_resolver = ProcessingPipelineResolver()
-            # Preserve user order: pySigma's resolve() sorts by (priority, path).
-            # When priorities are equal it uses pipeline name, so e.g. "Add Channel..."
-            # runs before "Generic Log Sources..." and Channel is never set for Sysmon.
-            # Temporarily set priority to index so user order is respected.
-            original_priorities = [p.priority for p in pipelines]
-            try:
-                for i, pipeline in enumerate(pipelines):
-                    pipeline.priority = i
-                for pipeline in pipelines:
-                    pipeline_resolver.add_pipeline_class(pipeline)
-                # Resolve using pipeline names in user order (lower priority = earlier)
-                combined_pipeline = pipeline_resolver.resolve([p.name for p in pipelines])
-            finally:
-                for pipeline, orig in zip(pipelines, original_priorities, strict=True):
-                    pipeline.priority = orig
-            # Instantiate backend, using our resolved pipeline
-            # row_id is the logs table's integer primary key: correlation evidence
-            # names events by it.
-            sqlite_backend = sqlite.sqliteBackend(
-                combined_pipeline, timestamp_field=self.time_field, event_id_field="row_id"
-            )
-            sqlite_backend.init_processing_pipeline("zircolite")
+        Every path goes into one collection, so a correlation can name a rule
+        defined in another file or directory, and a Sigma filter applies to the
+        rules of every path. Each path still gets its own conversion summary
+        and, with --save-ruleset, its own saved ruleset.
+        """
+        paths = [Path(p) for p in sigma_rules_list]
+        documents: list[SigmaCollection] = []
+        # Resolved file -> index of the path it was loaded from
+        origin: dict[Path, int] = {}
+        invalid = [0] * len(paths)
+        unloadable = [0] * len(paths)
+        for index, path in enumerate(paths):
+            files = sorted(path.rglob("*.yml")) + sorted(path.rglob("*.yaml")) if path.is_dir() else [path]
+            valid = [f for f in files if self.is_valid_sigma_rule(f)]
+            invalid[index] = len(files) - len(valid)
+            if invalid[index]:
+                self.logger.debug(f"[yellow]    [!] Skipped {invalid[index]} invalid Sigma rule(s)[/]")
+            for file in valid:
+                resolved = file.resolve()
+                if resolved in origin:
+                    continue
+                try:
+                    # As SigmaCollection.load_ruleset does: filters are collected per
+                    # file and applied once, over every rule, when the files merge.
+                    with open(file, encoding="utf-8") as handle:
+                        documents.append(SigmaCollection.from_yaml(
+                            handle, source=SigmaRuleLocation(file),
+                            collect_filters=True, resolve_references=False,
+                        ))
+                except Exception as e:
+                    self.logger.error(f"[red]    [-] Cannot load {literal(file)}: {literal(e)}[/]")
+                    unloadable[index] += 1
+                    continue
+                origin[resolved] = index
 
-            rules = Path(sigma_rules)
-            if rules.is_dir():
-                rule_list = list(rules.rglob("*.yml")) + list(rules.rglob("*.yaml"))
-            else:
-                rule_list = [rules]
+        if not documents:
+            return []
 
-            # Filter out invalid Sigma rules
-            valid_rule_list = [r for r in rule_list if self.is_valid_sigma_rule(r)]
-            skipped_count = len(rule_list) - len(valid_rule_list)
-            if skipped_count > 0:
-                self.logger.debug(f"[yellow]    [!] Skipped {skipped_count} invalid Sigma rule(s)[/]")
+        sqlite_backend = self._sigma_backend(pipelines)
+        rule_collection = self._resolve_references(
+            SigmaCollection.merge(documents, resolve_references=False)
+        )
+        rulesets: list[list[dict[str, Any]]] = [[] for _ in paths]
+        referenced_only = [0] * len(paths)
+        failed = [0] * len(paths)
 
-            if not valid_rule_list:
-                continue
+        # Process rules with Rich progress bar
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(bar_width=40),
+            TextColumn("[cyan]{task.completed}/{task.total}[/]"),
+            console=console,
+            transient=True,
+            disable=is_quiet(),
+        )
 
-            rule_collection = SigmaCollection.load_ruleset(
-                [str(p) for p in valid_rule_list]
-            )
-            ruleset: list[dict[str, Any]] = []
-
-            # Process rules with Rich progress bar
-            progress = Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(bar_width=40),
-                TextColumn("[cyan]{task.completed}/{task.total}[/]"),
-                console=console,
-                transient=True,
-                disable=is_quiet(),
-            )
-
-            with progress:
-                task_id = progress.add_task("Converting rules", total=len(rule_collection))
-                skipped_referenced_only = 0
-                for rule in rule_collection:
-                    # Rules only referenced by correlation have _output False; pySigma does not
-                    # return standalone queries for them, but convert_rule must still run so
-                    # correlation conversion can embed the referenced detection SQL.
-                    if isinstance(rule, SigmaRule) and not rule._output:
-                        try:
+        with progress:
+            task_id = progress.add_task("Converting rules", total=len(rule_collection))
+            for rule in rule_collection:
+                rule_path = _rule_path(rule)
+                index = origin.get(Path(rule_path).resolve(), 0) if rule_path else 0
+                # A rule referenced by a correlation, and not generated on its own,
+                # returns no standalone query; converting it still stores the
+                # predicates the correlation is compiled from. References come
+                # first in the collection, so they are ready when it is.
+                if not rule._output:
+                    try:
+                        if isinstance(rule, SigmaCorrelationRule):
+                            sqlite_backend.convert_correlation_rule(rule, "zircolite")
+                        else:
                             sqlite_backend.convert_rule(rule, "zircolite")
-                        except Exception as e:
-                            self.logger.debug(
-                                f"[red]    [-] Cannot convert rule '{rule!s}' : {e}[/]"
-                            )
-                        skipped_referenced_only += 1
-                        progress.update(task_id, advance=1)
-                        continue
-                    if isinstance(rule, SigmaCorrelationRule):
-                        converted_rule = self.convert_correlation_rule(
-                            sqlite_backend, rule
+                    except Exception as e:
+                        self.logger.debug(
+                            f"[red]    [-] Cannot convert rule '{rule!s}' : {e}[/]"
                         )
-                    else:
-                        converted_rule = self.convert_sigma_rules(sqlite_backend, rule)
-                    if converted_rule is not None:
-                        ruleset.append(converted_rule)
+                    referenced_only[index] += 1
                     progress.update(task_id, advance=1)
+                    continue
+                if isinstance(rule, SigmaCorrelationRule):
+                    converted_rule = self.convert_correlation_rule(
+                        sqlite_backend, rule
+                    )
+                else:
+                    converted_rule = self.convert_sigma_rules(sqlite_backend, rule)
+                if converted_rule is None:
+                    failed[index] += 1
+                else:
+                    rulesets[index].append(converted_rule)
+                progress.update(task_id, advance=1)
 
-            # Print conversion summary
-            conversion_errors = (
-                len(rule_collection) - skipped_referenced_only - len(ruleset)
-            )
+        combined_ruleset: list[dict[str, Any]] = []
+        for index, path in enumerate(paths):
+            ruleset = sorted(rulesets[index], key=lambda d: d.get('level', 'informational'))
             summary_parts = [f"[green]\\[✓][/] Converted [cyan]{len(ruleset)}[/] rules"]
-            if skipped_count > 0 or conversion_errors > 0:
-                detail_parts = []
-                if skipped_count > 0:
-                    detail_parts.append(f"{skipped_count} invalid skipped")
-                if conversion_errors > 0:
-                    detail_parts.append(f"{conversion_errors} failed")
+            if len(paths) > 1:
+                summary_parts.append(f" from {literal(path)}")
+            detail_parts = []
+            if invalid[index]:
+                detail_parts.append(f"{invalid[index]} invalid skipped")
+            if unloadable[index] or failed[index]:
+                detail_parts.append(f"{unloadable[index] + failed[index]} failed")
+            if detail_parts:
                 summary_parts.append(f" [dim]({', '.join(detail_parts)})[/]")
             self.logger.info("".join(summary_parts))
 
-            ruleset = sorted(ruleset, key=lambda d: d.get('level', 'informational'))
-
             if self.saveRuleset:
-                temp_ruleset_name = self.rand_ruleset_name(str(sigma_rules))
+                temp_ruleset_name = self.rand_ruleset_name(str(path))
                 with open(temp_ruleset_name, "w", encoding="utf-8") as outfile:
                     outfile.write(
                         json.dumps(ruleset, option=json.OPT_INDENT_2).decode("utf-8")
                     )
-                    self.logger.info(f"[+] Saved ruleset as : {make_file_link(temp_ruleset_name)}")
+                self.logger.info(f"[+] Saved ruleset as : {make_file_link(temp_ruleset_name)}")
 
             combined_ruleset.extend(ruleset)
 
@@ -915,6 +996,7 @@ class RulesetHandler:
     def ruleset_parsing(self) -> list[list[dict[str, Any]]]:
         """Parse and convert rulesets from files or directories."""
         ruleset_list = []
+        yaml_paths: list[Path] = []
         for ruleset in self.rulesetPathList:
             ruleset_path = Path(ruleset)
             if not ruleset_path.exists():
@@ -945,20 +1027,21 @@ class RulesetHandler:
                     except Exception as e:
                         self.logger.error(f"[red]    [-] Cannot load {literal(ruleset_path)} {literal(e)}[/]")
                 elif self.is_yaml(ruleset_path):  # YAML Ruleset
-                    try:
-                        self.logger.info(f"    [>] Converting Native Sigma to Zircolite ruleset : {make_file_link(str(ruleset_path))}")
-                        ruleset_list.append(self.sigma_rules_to_ruleset([ruleset_path], self.pipelines))
-                    except Exception as e:
-                        self.logger.error(f"[red]    [-] Cannot convert {literal(ruleset_path)} {literal(e)}[/]")
+                    self.logger.info(f"    [>] Converting Native Sigma to Zircolite ruleset : {make_file_link(str(ruleset_path))}")
+                    yaml_paths.append(ruleset_path)
                 else:
                     self.logger.warning(
                         f"[yellow]    [!] Skipping unrecognized ruleset file "
                         f"(not a valid JSON ruleset or Sigma YAML file): {literal(ruleset_path)}[/]"
                     )
             elif ruleset_path.is_dir():  # Directory
-                try:
-                    self.logger.info(f"    [>] Converting Native Sigma to Zircolite ruleset : {make_file_link(str(ruleset_path))}")
-                    ruleset_list.append(self.sigma_rules_to_ruleset([ruleset_path], self.pipelines))
-                except Exception as e:
-                    self.logger.error(f"[red]    [-] Cannot convert {literal(ruleset_path)} {literal(e)}[/]")
+                self.logger.info(f"    [>] Converting Native Sigma to Zircolite ruleset : {make_file_link(str(ruleset_path))}")
+                yaml_paths.append(ruleset_path)
+        if yaml_paths:
+            # One collection for every path, so correlations resolve across them
+            try:
+                ruleset_list.append(self.sigma_rules_to_ruleset(yaml_paths, self.pipelines))
+            except Exception as e:
+                names = ", ".join(str(path) for path in yaml_paths)
+                self.logger.error(f"[red]    [-] Cannot convert {literal(names)} {literal(e)}[/]")
         return ruleset_list

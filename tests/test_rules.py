@@ -881,7 +881,7 @@ class TestPipelineOrderPreserved:
         wmi_rule = tmp_path / "wmi_event_subscription.yml"
         wmi_rule.write_text("""
 title: WMI Event Subscription
-id: test-wmi-001
+id: 0d7c7c2a-6a4e-4d0a-9a53-2f1d1b8f3c01
 status: test
 logsource:
     product: windows

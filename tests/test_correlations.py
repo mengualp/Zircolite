@@ -385,3 +385,96 @@ class TestCorrelationReporting:
         ])
 
         assert collapsed == [{"id": "x", "count": 3, "alert_count": 3, "event_count": 7}]
+
+
+@pytest.mark.requires_sigma
+class TestOneCollectionAcrossPaths:
+    """Every YAML path of a run is one Sigma collection, so references cross files."""
+
+    @staticmethod
+    def handler(paths, **config):
+        return RulesetHandler(RulesetConfig(ruleset=[str(p) for p in paths], **config))
+
+    @staticmethod
+    def write(path, *documents):
+        path.write_text(yaml.safe_dump_all(documents))
+        return path
+
+    def test_a_correlation_resolves_a_rule_from_another_file(self, tmp_path):
+        a = self.write(tmp_path / "base.yml", base())
+        b = self.write(tmp_path / "corr.yml", correlation())
+
+        rules = self.handler([b, a]).rulesets
+
+        assert [rule["title"] for rule in rules] == ["burst"]
+        assert rules[0]["correlation_plan"]["version"] == 2
+
+    def test_a_file_that_fails_to_load_leaves_the_others(self, tmp_path, caplog):
+        folder = tmp_path / "rules"
+        folder.mkdir()
+        self.write(folder / "good.yml", {**base("good"), "level": "high"})
+        self.write(folder / "bad.yml", {**base("bad"), "id": "not-a-uuid"})
+
+        with caplog.at_level(logging.ERROR):
+            rules = self.handler([folder]).rulesets
+
+        assert [rule["title"] for rule in rules] == ["good"]
+        assert "bad.yml" in caplog.text
+
+    def test_a_missing_reference_drops_only_its_correlations(self, tmp_path, caplog):
+        path = self.write(
+            tmp_path / "rules.yml",
+            {**base("standalone"), "level": "high"},
+            correlation(rules=("nowhere",), name="orphan"),
+            correlation("temporal_ordered", ("orphan", "standalone"), name="parent"),
+        )
+
+        with caplog.at_level(logging.ERROR):
+            rules = self.handler([path]).rulesets
+
+        assert [rule["title"] for rule in rules] == ["standalone"]
+        assert "'orphan'" in caplog.text and "'nowhere'" in caplog.text
+        assert "'parent'" in caplog.text
+
+    @needs_json_sqlite
+    def test_a_chain_across_three_files_runs(self, tmp_path, make_core):
+        a = self.write(tmp_path / "a.yml", base("proc", 1), base("logon", 2))
+        b = self.write(tmp_path / "b.yml", correlation(name="burst"))
+        c = self.write(tmp_path / "c.yml", correlation("temporal_ordered", ("burst", "logon"), name="then_logon"))
+
+        rules = self.handler([c, b, a]).rulesets
+        core = make_core([event(0), event(1), event(2, EventID=2)])
+        result = core.execute_rule(rules[0])
+
+        assert [rule["title"] for rule in rules] == ["then_logon"]
+        assert result["count"] == 1
+        assert len(result["matches"][0]["child_alert_ids"]) == 1
+        assert result["event_count"] == 3
+
+    def test_each_path_is_saved_on_its_own(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        a = self.write(tmp_path / "a.yml", {**base("first"), "level": "high"}, base("proc"))
+        b = self.write(tmp_path / "b.yml", correlation())
+
+        rules = self.handler([a, b], save_ruleset=True).rulesets
+
+        saved = sorted(
+            [rule["title"] for rule in json.loads(path.read_text())]
+            for path in tmp_path.glob("ruleset-*.json")
+        )
+        assert {rule["title"] for rule in rules} == {"first", "burst"}
+        # The correlation is saved with the path that defines it, its plan self-contained
+        assert saved == [["burst"], ["first"]]
+
+    def test_a_sigma_filter_applies_to_rules_of_every_path(self, tmp_path):
+        a = self.write(tmp_path / "a.yml", {**base("proc"), "id": "7e3c9e4f-2f5e-4a1b-9b0e-1c2d3e4f5a6b", "level": "high"})
+        b = self.write(tmp_path / "b.yml", {
+            "title": "Not admin",
+            "logsource": {"product": "windows", "category": "test"},
+            "filter": {"rules": ["7e3c9e4f-2f5e-4a1b-9b0e-1c2d3e4f5a6b"],
+                       "selection": {"User": "admin"}, "condition": "not selection"},
+        })
+
+        [rule] = self.handler([a, b]).rulesets
+
+        assert "User" in rule["rule"][0]
