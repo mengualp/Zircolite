@@ -372,7 +372,7 @@ def process_unified_streaming(
 
     if ctx.limit > 0:
         ctx.logger.info(
-            f"[+] Limited mode: detections with more than [yellow]{ctx.limit}[/] events will be discarded"
+            f"[+] Limited mode: detections with more than [yellow]{ctx.limit}[/] events (alerts for correlations) will be discarded"
         )
 
     ctx.logger.info(
@@ -536,7 +536,7 @@ def process_perfile_streaming(
 
                 if ctx.limit > 0 and first_file:
                     ctx.logger.info(
-                        f"[+] Limited mode: detections with more than [yellow]{ctx.limit}[/] events will be discarded"
+                        f"[+] Limited mode: detections with more than [yellow]{ctx.limit}[/] events (alerts for correlations) will be discarded"
                     )
 
                 write_mode = "w" if first_file else "a"
@@ -752,7 +752,7 @@ def process_db_input(
             if ctx.limit > 0 and first_file:
                 ctx.logger.info(
                     f"[+] Limited mode: detections with more than "
-                    f"[yellow]{ctx.limit}[/] events will be discarded"
+                    f"[yellow]{ctx.limit}[/] events (alerts for correlations) will be discarded"
                 )
 
             write_mode = "w" if first_file else "a"
@@ -1412,7 +1412,8 @@ def process_parallel_streaming(
             if title in rule_summary:
                 rule_summary[title]["count"] += count
             else:
-                rule_summary[title] = {"level": level, "count": count, "tags": tags}
+                rule_summary[title] = {"level": level, "count": count, "tags": tags,
+                                       "result_type": result.get("result_type")}
 
         aggregated_results = [
             {
@@ -1420,6 +1421,7 @@ def process_parallel_streaming(
                 "rule_level": info["level"],
                 "count": info["count"],
                 "tags": info.get("tags", []),
+                "result_type": info["result_type"],
             }
             for title, info in sorted(
                 rule_summary.items(), key=lambda item: sort_key_severity(

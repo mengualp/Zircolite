@@ -17,6 +17,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from zircolite import ProcessingConfig, ZircoliteCore
 from zircolite.config import RulesetConfig
 from zircolite.rules import RulesetHandler, RulesUpdater, UnknownPipelineError
 from zircolite.sqlscan import rebalance_sql
@@ -706,11 +707,12 @@ level: high
         assert len(handler.rulesets) == 1
         corr = handler.rulesets[0]
         assert corr.get("correlation") is True
-        assert "event_count" in corr["rule"][0] or "GROUP BY" in corr["rule"][0]
+        assert corr["result_type"] == "correlation"
+        assert corr["correlation_plan"]["event_id_field"] == "row_id"
         assert "EventID" in corr["rule"][0]
 
-    def test_correlation_event_count_sql_runs_on_sqlite(self, tmp_path, test_logger):
-        """Generated event_count SQL executes against a minimal logs table."""
+    def test_correlation_event_count_plan_runs_through_the_core(self, tmp_path, test_logger, field_mappings_file):
+        """The converted plan runs on a logs table and reports one alert per burst."""
         rules_yml = tmp_path / "rules.yml"
         rules_yml.write_text("""
 ---
@@ -746,21 +748,23 @@ level: high
             ),
             logger=test_logger,
         )
-        sql = handler.rulesets[0]["rule"][0]
-        conn = sqlite3.connect(":memory:")
+        core = ZircoliteCore(field_mappings_file, ProcessingConfig(no_output=True), logger=test_logger)
         try:
-            conn.execute("CREATE TABLE logs (EventID INTEGER, Image TEXT)")
-            for _ in range(3):
-                conn.execute(
-                    "INSERT INTO logs (EventID, Image) VALUES (?, ?)",
-                    (1, "C:\\\\Windows\\\\System32\\\\cmd.exe"),
-                )
-            rows = conn.execute(sql).fetchall()
-            assert len(rows) == 1
-            assert rows[0][0] == "C:\\\\Windows\\\\System32\\\\cmd.exe"
-            assert rows[0][1] == 3  # event_count
+            core.create_db("SystemTime TEXT COLLATE NOCASE, Channel TEXT COLLATE NOCASE, EventID INTEGER, Image TEXT COLLATE NOCASE")
+            core.insert_data_to_db([
+                {"SystemTime": f"2026-01-01T00:00:0{i}Z", "Channel": "Microsoft-Windows-Sysmon/Operational",
+                 "EventID": 1, "Image": "C:\\Windows\\System32\\cmd.exe"}
+                for i in range(3)
+            ])
+            result = core.execute_rule(handler.rulesets[0])
         finally:
-            conn.close()
+            core.close()
+        assert result["count"] == 1
+        assert result["event_count"] == 3
+        alert = result["matches"][0]
+        # Group keys are folded to lower case; the evidence keeps the original
+        assert alert["group_keys"] == {"Image": "c:\\windows\\system32\\cmd.exe"}
+        assert alert["evidence"][0]["event"]["Image"] == "C:\\Windows\\System32\\cmd.exe"
 
     def test_temporal_correlation_uses_configured_time_field(self, tmp_path, test_logger):
         """Temporal correlation SQL references the time_field from RulesetConfig, not 'timestamp'."""
@@ -818,6 +822,7 @@ level: high
         assert len(corr) == 1
         sql = corr[0]["rule"][0]
         assert "UtcTime" in sql
+        assert "UtcTime" in corr[0]["correlation_plan"]["required_fields"]["logs"]
         assert "timestamp" not in sql.lower().split("utctime")[0]
 
     def test_event_count_correlation_uses_custom_time_field(self, tmp_path, test_logger):

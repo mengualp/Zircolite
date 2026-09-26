@@ -184,7 +184,7 @@ def parse_arguments() -> argparse.Namespace:
     output_formats_args.add_argument("-d", "--dbfile", "--db-file", help="Save all logs to a SQLite database file", type=str)
     output_formats_args.add_argument("-l", "--logfile", "--log-file", help=f"Log file name (default: {DEFAULTS['logfile']})", default=None, type=str)
     output_formats_args.add_argument("--hashes", help="Add xxhash64 of the original log event to each event", action='store_true')
-    output_formats_args.add_argument("-L", "--limit", "--limit-results", help=f"Discard rules matching more events than this, per input database — so per file in the default mode, and across the whole corpus with --unified-db (default: {DEFAULTS['limit']}, i.e. no limit)", type=int, default=None)
+    output_formats_args.add_argument("-L", "--limit", "--limit-results", help=f"Discard rules matching more events than this (alerts, for a correlation rule), per input database — so per file in the default mode, and across the whole corpus with --unified-db (default: {DEFAULTS['limit']}, i.e. no limit)", type=int, default=None)
 
     # Advanced configuration options
     config_formats_args = parser.add_argument_group('⚙️  ADVANCED CONFIGURATION')
@@ -652,7 +652,9 @@ def collapse_results_by_rule(all_results: list[Any]) -> list[dict[str, Any]]:
         if existing is None:
             collapsed[key] = dict(result)
         else:
-            existing["count"] = existing.get("count", 0) + result.get("count", 0)
+            for field in ("count", "alert_count", "event_count"):
+                if field in result or field in existing:
+                    existing[field] = existing.get(field, 0) + result.get(field, 0)
     return list(collapsed.values())
 
 
@@ -766,7 +768,7 @@ def print_stats(
         for result in all_results:
             level = result.get("rule_level", "unknown")
             count = result.get("count", 0)
-            det_stats.add_detection(level, count)
+            det_stats.add_detection(level, count, alerts=result.get("result_type") == "correlation")
 
         detection_parts = []
         if det_stats.critical > 0:
@@ -799,11 +801,16 @@ def print_stats(
                 f"[cyan]{matched_rules}[/]/[cyan]{total_rules}[/] rules matched ({coverage_pct:.1f}%)  [dim]{cov_bar}[/]"
             )
 
-        # Total matched events
-        if det_stats.total_events > 0:
+        # Total matched events, and correlation alerts, which are not events
+        if det_stats.total_events or det_stats.total_alerts:
+            matched = []
+            if det_stats.total_events:
+                matched.append(f"[magenta]{det_stats.total_events:,}[/] events")
+            if det_stats.total_alerts:
+                matched.append(f"[magenta]{det_stats.total_alerts:,}[/] correlation alerts")
             summary_table.add_row(
                 "🔍 Matched",
-                f"[magenta]{det_stats.total_events:,}[/] events across [cyan]{det_stats.total_rules_matched}[/] rules"
+                f"{' and '.join(matched)} across [cyan]{det_stats.total_rules_matched}[/] rules"
             )
 
         # Top-N detections by severity (most critical first)

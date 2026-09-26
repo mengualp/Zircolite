@@ -275,9 +275,12 @@ class PreparedRules:
 
 
 def rule_queries(rules):
-    """Prepare SQL only; leave malformed rule values to the existing evaluator."""
+    """Prepare SQL only; leave malformed rule values to the existing evaluator.
+
+    A correlation plan never runs its ``rule`` SQL, so there is nothing to prepare.
+    """
     return tuple(query for rule in rules
-                 if isinstance(rule.get("rule"), (list, tuple))
+                 if isinstance(rule.get("rule"), (list, tuple)) and rule.get("correlation_plan") is None
                  for query in rule["rule"] if isinstance(query, str))
 
 

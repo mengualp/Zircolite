@@ -43,8 +43,33 @@ from .config import RulesetConfig
 
 # Rich console for styled output
 from .console import console, is_quiet, literal, make_file_link
+from .correlations import is_correlation_plan_rule, plan_problem
 from .sqlscan import channel_constraints, eventid_constraints
 from .utils import random_suffix, safe_load_all
+
+# Newest Zircolite ruleset format this version reads. Version 2 (pySigma's
+# SQLite backend 2) adds required_fields, result_type and correlation plans;
+# rulesets without a schema_version are version 1.
+RULESET_SCHEMA_VERSION = 2
+
+
+def ruleset_format_problem(rules: list[dict[str, Any]]) -> str | None:
+    """Why this JSON ruleset cannot be run as written, or None if it can."""
+    for rule in rules:
+        title = rule.get("title", "untitled rule")
+        version = rule.get("schema_version", 1)
+        if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+            return f"rule {title!r} has an invalid schema_version {version!r}"
+        if version > RULESET_SCHEMA_VERSION:
+            return (
+                f"rule {title!r} uses ruleset schema version {version}, and this "
+                f"Zircolite reads up to version {RULESET_SCHEMA_VERSION}: update Zircolite"
+            )
+        is_correlation = rule.get("correlation") or rule.get("result_type") == "correlation"
+        if version >= 2 and is_correlation and not is_correlation_plan_rule(rule):
+            # Run as plain SQL, its alert rows would be reported as events.
+            return f"correlation rule {title!r} has no correlation_plan"
+    return None
 
 
 class EventFilter:
@@ -187,6 +212,12 @@ class EventFilter:
 
     def _extract_filter_data(self, rulesets: list[dict[str, Any]]) -> None:
         """Collect the channels, the eventIDs, and the per-channel bounds."""
+        if any(is_correlation_plan_rule(rule) for rule in rulesets):
+            # A correlation plan reads every row: the latest timestamp in the
+            # input, matched or not, is the horizon its absence windows wait for,
+            # and a pure-negative condition takes its groups from unmatched events.
+            self.logger.debug("EventFilter: a correlation plan reads every event - filtering disabled")
+            return
         rules_with_filter = 0
         rules_without_filter = 0
         rules_without_channel = 0
@@ -625,9 +656,15 @@ class RulesetHandler:
             self.logger.error("[red]    [-] No rules to execute ![/]")
         else:
             self.logger.info(f"[+] {len(self.rulesets)} rules loaded")
+            self._report_unrunnable_plans()
 
             self.event_filter = EventFilter(self.rulesets, logger=self.logger)
-            if self.event_filter.is_enabled:
+            if any(is_correlation_plan_rule(rule) for rule in self.rulesets):
+                self.logger.info(
+                    "[+] Event filter disabled: correlation rules read every event "
+                    "(the last one sets the end of the observation window)"
+                )
+            elif self.event_filter.is_enabled:
                 stats = self.event_filter.get_stats()
                 if stats['mode'] == 'per-channel':
                     summary = f"[cyan]{stats['channels_count']}[/] channels"
@@ -644,6 +681,21 @@ class RulesetHandler:
                     self.logger.info(
                         f"[+] Event filter enabled: [cyan]{stats['eventids_count']}[/] eventIDs"
                     )
+
+    def _report_unrunnable_plans(self) -> None:
+        """Say once, at load time, which correlation plans cannot run here.
+
+        They stay in the ruleset, so every run also records them as rules in
+        error and reports a partial status rather than a clean one.
+        """
+        problems: dict[str, int] = {}
+        for rule in self.rulesets:
+            if is_correlation_plan_rule(rule):
+                problem = plan_problem(rule["correlation_plan"])
+                if problem is not None:
+                    problems[problem] = problems.get(problem, 0) + 1
+        for problem, count in problems.items():
+            self.logger.error(f"[red]    [-] {count} correlation rule(s) cannot run: {literal(problem)}[/]")
 
     def is_yaml(self, filepath: Path) -> bool | None:
         """Test if the file is a YAML file (including multi-document streams)."""
@@ -709,6 +761,10 @@ class RulesetHandler:
             merged["rule"] = [
                 query for entry in converted for query in entry.get("rule", [])
             ]
+            if any("required_fields" in entry for entry in converted):
+                merged["required_fields"] = sorted({
+                    field for entry in converted for field in entry.get("required_fields", [])
+                })
         return merged
 
     def convert_sigma_rules(self, backend: Any, rule: Any) -> dict[str, Any] | None:
@@ -763,8 +819,11 @@ class RulesetHandler:
                 for pipeline, orig in zip(pipelines, original_priorities, strict=True):
                     pipeline.priority = orig
             # Instantiate backend, using our resolved pipeline
-            sqlite_backend = sqlite.sqliteBackend(combined_pipeline)
-            sqlite_backend.timestamp_field = self.time_field
+            # row_id is the logs table's integer primary key: correlation evidence
+            # names events by it.
+            sqlite_backend = sqlite.sqliteBackend(
+                combined_pipeline, timestamp_field=self.time_field, event_id_field="row_id"
+            )
             sqlite_backend.init_processing_pipeline("zircolite")
 
             rules = Path(sigma_rules)
@@ -876,6 +935,10 @@ class RulesetHandler:
                                 f"[red]    [-] {literal(ruleset_path)} is not a Zircolite "
                                 "ruleset: expected a JSON array of rule objects[/]"
                             )
+                            continue
+                        problem = ruleset_format_problem(parsed)
+                        if problem is not None:
+                            self.logger.error(f"[red]    [-] Cannot load {literal(ruleset_path)}: {literal(problem)}[/]")
                             continue
                         ruleset_list.append(parsed)
                         self.logger.info(f"    [>] Loaded JSON/Zircolite ruleset : {make_file_link(str(ruleset_path))}")

@@ -196,10 +196,11 @@ class DetectionStats:
     low: int = 0
     informational: int = 0
     total_events: int = 0
+    total_alerts: int = 0
     total_rules_matched: int = 0
 
-    def add_detection(self, level: str, count: int):
-        """Add a detection to the stats."""
+    def add_detection(self, level: str, count: int, *, alerts: bool = False):
+        """Add a detection to the stats; a correlation rule's count is alerts, not events."""
         level_lower = level.lower()
         if level_lower == "critical":
             self.critical += count
@@ -211,7 +212,10 @@ class DetectionStats:
             self.low += count
         elif level_lower == "informational":
             self.informational += count
-        self.total_events += count
+        if alerts:
+            self.total_alerts += count
+        else:
+            self.total_events += count
         self.total_rules_matched += 1
 
 
@@ -501,7 +505,8 @@ def build_attack_summary(results: list[dict[str, Any]]) -> Panel | None:
 def build_detection_table(results: list[dict[str, Any]], title: str | None = None) -> Table:
     """
     Build a Rich Table showing detection results with severity, rule name,
-    event count, and ATT&CK technique IDs.
+    match count, and ATT&CK technique IDs. A correlation rule matches alerts
+    rather than events, and says so.
 
     Args:
         results: List of detection result dicts, pre-sorted by severity
@@ -520,7 +525,7 @@ def build_detection_table(results: list[dict[str, Any]], title: str | None = Non
     )
     table.add_column("Severity", justify="center", width=14, no_wrap=True)
     table.add_column("Rule", no_wrap=False, ratio=1)
-    table.add_column("Events", justify="right", style="magenta", width=8)
+    table.add_column("Matches", justify="right", style="magenta", width=14)
     table.add_column("ATT&CK", style="dim", width=22, no_wrap=True)
 
     for result in results:
@@ -539,7 +544,8 @@ def build_detection_table(results: list[dict[str, Any]], title: str | None = Non
         else:
             attack_str = ", ".join(attack_ids)
 
-        table.add_row(level_text, rule_title, f"{count:,}", attack_str)
+        count_text = f"{count:,} alerts" if result.get("result_type") == "correlation" else f"{count:,}"
+        table.add_row(level_text, rule_title, count_text, attack_str)
 
     return table
 
