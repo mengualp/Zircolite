@@ -14,6 +14,10 @@ from typing import Any
 
 PLAN_VERSION = 2
 
+# How a time field can be written, as the backend's timestamp_format names it:
+# ISO 8601 text, or Unix seconds, milliseconds or microseconds.
+TIMESTAMP_FORMATS = ("iso", "unix", "unix_ms", "unix_us")
+
 # Alert summary columns, in the order the backend reports them, then the
 # fields Zircolite adds.
 CORRELATION_COLUMNS = [

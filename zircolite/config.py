@@ -114,6 +114,8 @@ class RulesetConfig:
     pipeline: list[list[str]] | None = None
     save_ruleset: bool = False
     time_field: str = "SystemTime"
+    # How time_field is written: iso, unix, unix_ms or unix_us
+    timestamp_format: str = "iso"
 
 
 @dataclass

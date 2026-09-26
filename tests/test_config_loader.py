@@ -390,6 +390,16 @@ class TestConfigLoaderValidate:
 
         assert any("Invalid output format" in issue for issue in issues)
 
+    @pytest.mark.parametrize("value,valid", [("unix_ms", True), (None, True), ("epoch", False)])
+    def test_validate_timestamp_format(self, test_logger, value, valid):
+        """A bad value would otherwise reach the Sigma backend, which refuses it."""
+        config = ZircoliteConfig()
+        config.rules.timestamp_format = value
+
+        issues = ConfigLoader(logger=test_logger).validate_config(config)
+
+        assert any("timestamp_format" in issue for issue in issues) is not valid
+
     def test_validate_csv_with_multiple_rulesets(self, tmp_path, test_logger):
         """Test validation warns about CSV with multiple rulesets."""
         # Create ruleset files

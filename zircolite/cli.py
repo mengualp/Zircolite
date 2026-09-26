@@ -86,6 +86,7 @@ from zircolite.assets import (
     resolve_shipped_template,
 )
 from zircolite.console import literal
+from zircolite.correlations import TIMESTAMP_FORMATS
 
 # Input format registry
 from zircolite.formats import DEFAULT_EXTENSION
@@ -160,6 +161,7 @@ def parse_arguments() -> argparse.Namespace:
     rulesets_formats_args.add_argument("-r", "--ruleset", help="Sigma ruleset in JSON (Zircolite format) or YAML/directory of YAML files (Native Sigma format)", action='append', nargs='+')
     rulesets_formats_args.add_argument("-sr", "--save-ruleset", help="Save converted ruleset (from Sigma to Zircolite format) to disk", action='store_true')
     rulesets_formats_args.add_argument("-p", "--pipeline", help="Use specified pipeline for native Sigma rulesets (YAML). Examples: 'sysmon', 'windows-logsources', 'windows-audit'. Use '--pipeline-list' to see available pipelines.", action='append', nargs='+')
+    rulesets_formats_args.add_argument("--timestamp-format", choices=TIMESTAMP_FORMATS, default=None, help=f"How the time field is written, for correlation rules converted from native Sigma rulesets (YAML): ISO 8601 (iso) or Unix seconds, milliseconds or microseconds (default: {DEFAULTS['timestamp_format']}). Compiled JSON rulesets keep the format they were converted with")
     rulesets_formats_args.add_argument("-pl", "--pipeline-list", help="List all installed pysigma pipelines", action='store_true')
     rulesets_formats_args.add_argument("-R", "--rulefilter", help="Remove rules from ruleset by matching rule title (case sensitive)", action='append', nargs='*')
     rulesets_formats_args.add_argument("--test-rules", help="JSON file with rule test cases (true-positive / true-negative events per rule)", type=str, metavar="TEST_FILE")
@@ -1322,6 +1324,7 @@ def _main(memory_tracker, start_time) -> None:
         pipeline=args.pipeline,
         save_ruleset=args.save_ruleset,
         time_field=args.timefield,
+        timestamp_format=args.timestamp_format,
     )
     try:
         if not is_quiet():
@@ -1338,6 +1341,11 @@ def _main(memory_tracker, start_time) -> None:
         sys.exit(2)
     if args.pipeline_list:
         sys.exit(0)
+    if _is_explicit(args, "timestamp_format") and not rulesets_manager.yaml_paths:
+        logger.warning(
+            "[yellow]   [!] --timestamp-format only applies to rules converted from native Sigma "
+            "rulesets (YAML): compiled JSON rulesets keep the format they were converted with[/]"
+        )
 
     # Nothing was going to be applied to the events. The empty result file this
     # would otherwise write is indistinguishable from a clean run that found

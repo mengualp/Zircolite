@@ -3897,12 +3897,12 @@ class TestCorrelationsNeedOneDatabase:
         "type": "event_count", "rules": ["base"], "group-by": ["Host"],
         "timespan": "5s", "condition": {"gte": 2}}}
 
-    def _run(self, tmp_path, *extra):
+    def _run(self, tmp_path, *extra, stamps=("2024-01-01T00:00:00Z", "2024-01-01T00:00:01Z")):
         import yaml
 
         logs = tmp_path / "logs"
         logs.mkdir()
-        for i, stamp in enumerate(["2024-01-01T00:00:00Z", "2024-01-01T00:00:01Z"]):
+        for i, stamp in enumerate(stamps):
             (logs / f"{i}.json").write_text(json.dumps({"SystemTime": stamp, "Host": "h", "EventID": 1}) + "\n")
         base = tmp_path / "base.yml"
         burst = tmp_path / "burst.yml"
@@ -3924,6 +3924,24 @@ class TestCorrelationsNeedOneDatabase:
         assert {e["event"]["OriginalLogfile"] for e in result["matches"][0]["evidence"]} == {"0.json", "1.json"}
         assert "correlation rule(s) need every file in one database" in log
 
+    @pytest.mark.parametrize("fmt,stamps", [
+        ("unix", (1704067200, 1704067201)),
+        ("unix_ms", (1704067200000, 1704067201000)),
+        ("unix_us", ("1704067200000000", "1704067201000000")),
+    ])
+    def test_numeric_timestamps_need_their_format(self, tmp_path, fmt, stamps):
+        results, _ = self._run(tmp_path, "--timestamp-format", fmt, stamps=stamps)
+
+        [result] = results
+        assert result["alert_count"] == 1
+        assert result["matches"][0]["SystemTime"] == "2024-01-01T00:00:01.000Z"
+
+    def test_numeric_timestamps_read_as_iso_are_reported(self, tmp_path):
+        results, log = self._run(tmp_path, stamps=(1704067200, 1704067201))
+
+        assert results == []
+        assert "2 event(s) without a valid timestamp" in log
+
     def test_no_auto_mode_keeps_files_apart_and_says_so(self, tmp_path):
         results, log = self._run(tmp_path, "--no-auto-mode")
 
@@ -3935,6 +3953,27 @@ class TestCorrelationsNeedOneDatabase:
 
         assert results[0]["alert_count"] == 1
         assert "--executor process ignored" in log
+
+
+class TestTimestampFormatOption:
+    def test_an_unknown_format_is_refused(self, tmp_path):
+        with patch("sys.argv", ["zircolite.py", "-e", str(tmp_path), "--timestamp-format", "epoch"]):
+            with pytest.raises(SystemExit) as exc:
+                zircolite_script.parse_arguments()
+        assert exc.value.code == 2
+
+    def test_it_is_said_to_do_nothing_for_json_rulesets(self, tmp_path):
+        events = tmp_path / "events.json"
+        events.write_text('{"EventID": 1}\n')
+        ruleset = tmp_path / "rules.json"
+        ruleset.write_text(json.dumps([{"title": "t", "level": "high", "rule": ["SELECT * FROM logs WHERE EventID=1"]}]))
+        argv = ["zircolite.py", "-e", str(events), "-j", "-r", str(ruleset), "--timestamp-format", "unix",
+                "-o", str(tmp_path / "out.json"), *get_log_arg(tmp_path)]
+
+        with patch("sys.argv", argv):
+            zircolite_script.main()
+
+        assert "--timestamp-format only applies" in (tmp_path / "test.log").read_text()
 
 
 class TestCorrelationRuleCount:

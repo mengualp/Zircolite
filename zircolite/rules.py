@@ -611,6 +611,9 @@ class RulesetHandler:
         self.saveRuleset = cfg.save_ruleset
         self.rulesetPathList = cfg.ruleset
         self.time_field = cfg.time_field
+        self.timestamp_format = cfg.timestamp_format
+        # The native Sigma paths converted in this run, if any
+        self.yaml_paths: list[Path] = []
         self.pipelines = []
         self.event_filter: EventFilter | None = None  # Will be populated after loading
 
@@ -833,7 +836,8 @@ class RulesetHandler:
         # row_id is the logs table's integer primary key: correlation evidence
         # names events by it.
         backend = sqlite.sqliteBackend(
-            combined_pipeline, timestamp_field=self.time_field, event_id_field="row_id"
+            combined_pipeline, timestamp_field=self.time_field, event_id_field="row_id",
+            timestamp_format=self.timestamp_format,
         )
         backend.init_processing_pipeline("zircolite")
         return backend
@@ -1037,6 +1041,7 @@ class RulesetHandler:
             elif ruleset_path.is_dir():  # Directory
                 self.logger.info(f"    [>] Converting Native Sigma to Zircolite ruleset : {make_file_link(str(ruleset_path))}")
                 yaml_paths.append(ruleset_path)
+        self.yaml_paths = yaml_paths
         if yaml_paths:
             # One collection for every path, so correlations resolve across them
             try:
