@@ -1278,6 +1278,26 @@ class TestBoundsComeFromRuleSql:
         assert event_filter.should_process_event("Security", 4720)
         assert event_filter.should_process_event("Security", 4624)
 
+    def test_explicit_nocase_collation_keeps_the_channel_bound(self):
+        """Rulesets built with the backend's collate_nocase spell the collation out
+        on every equality; the columns are NOCASE already, so the bound stands."""
+        rulesets = [
+            {
+                "title": "Sysmon process creation",
+                "channel": ["Microsoft-Windows-Sysmon/Operational"],
+                "eventid": [1],
+                "rule": [
+                    "SELECT * FROM logs WHERE Channel='Microsoft-Windows-Sysmon/Operational' "
+                    "COLLATE NOCASE AND (EventID=1 AND Image LIKE '%\\cmd.exe' ESCAPE '\\')"
+                ],
+            }
+        ]
+        event_filter = EventFilter(rulesets)
+
+        assert event_filter.should_process_event("microsoft-windows-sysmon/operational", 1)
+        assert not event_filter.should_process_event("Microsoft-Windows-Sysmon/Operational", 3)
+        assert not event_filter.should_process_event("Security", 1)
+
     def test_or_branch_without_an_eventid_does_not_bound_the_channel(self):
         """One free branch frees the disjunction, so the branch stays reachable."""
         rulesets = [

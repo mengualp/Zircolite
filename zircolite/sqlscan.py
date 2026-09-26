@@ -470,6 +470,11 @@ class _FieldReader:
         kind, name = _peek(atom, 0)
         if kind not in ("word", "name") or name.lower() != self.field:
             return None
+        if len(atom) == 5 and _peek_word(atom, 3) == "COLLATE" and _peek_word(atom, 4) == "NOCASE":
+            # Every logs column is declared NOCASE, so a ruleset that spells the
+            # collation out compares exactly as the bare equality does. Any other
+            # collation changes what matches, and stays unread.
+            atom = atom[:3]
         if len(atom) == 3 and atom[1] == ("punct", "="):
             value = self.coerce(*atom[2])
             return None if value is None else {value}

@@ -37,7 +37,7 @@ BROAD_FRACTION = 0.5
 _UNSUPPORTED_WORDS = frozenset((
     "SELECT", "FROM", "WHERE", "JOIN", "UNION", "INTERSECT", "EXCEPT", "ORDER",
     "GROUP", "HAVING", "LIMIT", "OFFSET", "WINDOW", "CASE", "WHEN", "THEN",
-    "ELSE", "END", "BETWEEN", "COLLATE", "OVER", "FILTER", "REGEXP", "GLOB", "MATCH",
+    "ELSE", "END", "BETWEEN", "OVER", "FILTER", "REGEXP", "GLOB", "MATCH",
     # Always keywords, even where a column carries the same name.
     "CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME",
 ))
@@ -205,6 +205,10 @@ def _parse_literal_plan(sql):
         body = tokens[5:]
         for i, (kind, value) in enumerate(body):
             if kind == "word" and value in _UNSUPPORTED_WORDS:
+                return None
+            # Every logs column is declared NOCASE, so an explicit NOCASE on an
+            # equality changes nothing; the reader rejects it after a LIKE.
+            if (kind, value) == ("word", "COLLATE") and body[i + 1:i + 2] != [("word", "NOCASE")]:
                 return None
             if kind == "punct" and value in (";", "?", ":", "@", "$", "."):
                 return None

@@ -499,6 +499,12 @@ column costs nothing — numeric equality and ranges are unaffected — and with
 numeric first value would leave the column comparing text case-sensitively for the rest
 of the run.
 
+Because every column is already `NOCASE`, a ruleset converted with the backend's
+`collate_nocase` option (`Channel='Security' COLLATE NOCASE`) compares exactly as the bare
+equality does. The Channel/EventID bounds, the rule census and the literal prefilter read
+an explicit `COLLATE NOCASE` on an equality as that equality. Any other collation changes
+what matches, so it leaves the bound unread and the statement unplanned.
+
 How far "the rest of that database" reaches depends on the mode. `--unified-db` really
 is one table, so the first value seen anywhere in the corpus types the column. Per-file
 and parallel modes rebuild the table between files, so each input is typed by its own
