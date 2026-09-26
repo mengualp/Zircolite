@@ -88,6 +88,17 @@ correlation rule, or a column holding values SQLite would coerce (numbers in `Ch
 BLOBs) always runs. The saving is the statement preparation: about 0.3 ms per rule,
 paid for every rule on every file in per-file and parallel modes.
 
+A rule with a `correlation_plan` (SQLite backend 2) never runs its `rule` SQL. `core.py`
+hands the plan to the backend's `runtime.execute_plan`, which widens `logs` with the
+plan's `required_fields`, materialises each stage as an indexed TEMP table, runs the
+result and diagnostic queries, fetches the evidence rows by `row_id` and drops the TEMP
+tables. A progress handler checks for Ctrl+C every 10,000 SQLite instructions, and the
+stages are dropped again after an interruption. Plans are never repaired, scanned,
+prefiltered or used to pick indexes: the SQL scan cannot read their CTEs and window
+functions, and a plan scans `logs` in full anyway. A plan whose version or SQLite
+requirement this install cannot meet is reported when the ruleset loads and recorded as
+a rule error on every run.
+
 Automatic literal filtering requires at least 1,000 rows and 32 distinct eligible
 queries. It is built once per `execute_ruleset` call and discarded after its output
 callbacks finish. `literal` forces construction; `off` disables it. Aho–Corasick searches necessary literals in each
@@ -545,6 +556,10 @@ that reference fields it does have. The absent columns are added as `NULL`, whic
 the rule evaluate exactly as it would against an event that simply lacks them. Rules
 whose fields are *all* absent are widened too, so `|exists: false` becomes `IS NULL` and
 matches every row.
+
+A backend-2 ruleset lists each rule's fields in `required_fields`, and those are added
+along with the ones the scan reads: a field used only inside a function call — the second
+field of `|fieldref|contains`, inside `replace()` — is invisible to the scan.
 
 Column names are read with `sqlscan.py`, not with a regex, for two reasons: the backend
 backtick-quotes every field name that is not `^[a-zA-Z0-9_]*$` — which is every ECS and
