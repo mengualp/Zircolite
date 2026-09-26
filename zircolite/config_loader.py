@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any
 
 from .assets import resolve_shipped_ruleset, resolve_shipped_template
+from .config import RULE_LEVELS
+from .correlations import TIMESTAMP_FORMATS
 from .formats import YAML_INPUT_FORMATS, is_valid_yaml_format
 from .utils import safe_load
 
@@ -55,6 +57,8 @@ class RulesConfig:
     pipelines: list[str] | None = None
     filters: list[str] | None = None  # Rule title filters to exclude
     save_ruleset: bool = False
+    timestamp_format: str | None = None
+    min_level: str | None = None
 
 
 @dataclass
@@ -252,7 +256,9 @@ class ConfigLoader:
                 rulesets=rulesets,
                 pipelines=rules.get('pipelines'),
                 filters=rules.get('filters'),
-                save_ruleset=rules.get('save_ruleset', False)
+                save_ruleset=rules.get('save_ruleset', False),
+                timestamp_format=rules.get('timestamp_format'),
+                min_level=rules.get('min_level'),
             )
 
         # Parse output section
@@ -356,6 +362,10 @@ class ConfigLoader:
         for ruleset in config.rules.rulesets:
             if not Path(resolve_shipped_ruleset(ruleset)).exists():
                 issues.append(f"Ruleset not found: {ruleset}")
+        if config.rules.timestamp_format not in (None, *TIMESTAMP_FORMATS):
+            issues.append(f"timestamp_format must be one of: {', '.join(TIMESTAMP_FORMATS)}")
+        if config.rules.min_level not in (None, *RULE_LEVELS):
+            issues.append(f"min_level must be one of: {', '.join(RULE_LEVELS)}")
 
         # Validate output
         if config.output.format not in ['json', 'csv']:
@@ -507,6 +517,15 @@ rules:
 
   # Write the converted Sigma -> Zircolite ruleset to disk
   save_ruleset: false
+
+  # Load only the rules at this level or above: informational, low, medium,
+  # high or critical. A rule without a level counts as informational.
+  min_level: null  # Example: medium
+
+  # How the time field is written, for correlation rules converted from native
+  # Sigma rules: iso, unix, unix_ms or unix_us. Compiled JSON rulesets keep the
+  # format they were converted with.
+  # timestamp_format: iso
 
 # Output configuration
 output:

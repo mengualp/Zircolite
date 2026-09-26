@@ -2735,6 +2735,21 @@ class TestRuleCensus:
         assert counts == {"case differs": 1, "eventids only": 1, "unbounded": 1, "one query can match": 1}
         assert core.metrics.data["pruned_rules"] == 1
 
+    def test_explicit_nocase_collation_still_bounds_the_rule(self, field_mappings_file, test_logger, monkeypatch):
+        core = ZircoliteCore(field_mappings_file, ProcessingConfig(no_output=True), logger=test_logger)
+        try:
+            core.create_db("Channel TEXT COLLATE NOCASE, EventID INTEGER")
+            core.insert_data_to_db([{"Channel": "Security", "EventID": 4688}])
+            rules = [
+                {"title": "present", "rule": ["SELECT * FROM logs WHERE Channel='SECURITY' COLLATE NOCASE AND EventID=4688"]},
+                {"title": "absent", "rule": ["SELECT * FROM logs WHERE Channel='System' COLLATE NOCASE AND EventID=7045"]},
+            ]
+            executed, counts = self._run(core, rules, monkeypatch)
+        finally:
+            core.close()
+        assert executed == ["present"]
+        assert counts == {"present": 1}
+
     def test_text_eventids_are_compared_as_sqlite_compares_them(self, field_mappings_file, test_logger, monkeypatch):
         core = ZircoliteCore(field_mappings_file, ProcessingConfig(no_output=True), logger=test_logger)
         try:

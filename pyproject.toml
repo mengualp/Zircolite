@@ -16,10 +16,10 @@ dependencies = [
     "jinja2>=2.11.3",
     "evtx>=0.6.2",
     "lxml>=4.9",
-    "pysigma>=0.10.10",
-    "pysigma-pipeline-sysmon>=1.0.3",
-    "pysigma-pipeline-windows>=1.1.1",
-    "pysigma-backend-sqlite>=0.1.1",
+    "pysigma>=1.5.1,<2",
+    "pysigma-pipeline-sysmon>=2.0.0",
+    "pysigma-pipeline-windows>=2.0.0",
+    "pysigma-backend-sqlite>=2.0.0,<3",
     "pyyaml>=6.0",
     "psutil>=5.9.0",
     "urllib3>=2.6.3",
@@ -62,8 +62,11 @@ python = ">=3.10,<3.16"
 # the list, `uv sync` would keep a kernel older than its source.
 [tool.uv]
 cache-keys = [{ file = "pyproject.toml" }, { file = "setup.py" }, { file = "zircolite/flatten_kernel.py" }]
-# Leave a release a week to be yanked before uv resolves to it.
-exclude-newer = "7 days"
+# Leave a release a few days to be yanked before uv resolves to it.
+exclude-newer = "3 days"
+# Released in step with Zircolite by the same maintainer: holding it back only
+# holds a release back from the backend it was built against.
+exclude-newer-package = { pysigma-backend-sqlite = false }
 
 [tool.ruff]
 # Without an explicit config ruff lints against whatever its current default

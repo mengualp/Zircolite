@@ -411,6 +411,42 @@ class TestChannelConstraints:
         assert channel_constraints([query]) is None
 
 
+class TestExplicitNocaseCollation:
+    """Rulesets built with the backend's ``collate_nocase`` spell the collation out.
+
+    Every logs column is already NOCASE, so the bound is the same one the bare
+    equality gives. Reading it as unbounded switched the channel filter off for
+    every Windows rule in such a ruleset.
+    """
+
+    @pytest.mark.parametrize(
+        "where,channels,eventids",
+        [
+            ("Channel='Security' COLLATE NOCASE AND EventID=4624", {"Security"}, {4624}),
+            ("Channel='Security' collate nocase AND EventID='4624' COLLATE NOCASE", {"Security"}, {4624}),
+            ("(Channel='A' COLLATE NOCASE OR Channel='B' COLLATE NOCASE) AND EventID=1", {"A", "B"}, {1}),
+            # Other collations change what matches
+            ("Channel='Security' COLLATE BINARY AND EventID=4624", None, {4624}),
+            ("Channel='Security' COLLATE RTRIM AND EventID=4624", None, {4624}),
+            # The collation binds to the last list member, not the IN
+            ("Channel IN ('A', 'B') COLLATE NOCASE AND EventID=1", None, {1}),
+            ("NOT (Channel='Security' COLLATE NOCASE) AND EventID=1", None, {1}),
+        ],
+    )
+    def test_nocase_equality_is_a_bound(self, where, channels, eventids):
+        query = f"SELECT * FROM logs WHERE {where}"
+
+        assert channel_constraints([query]) == channels
+        assert eventid_constraints([query]) == eventids
+
+    def test_collation_words_are_not_columns(self):
+        refs = column_refs(
+            "SELECT * FROM logs WHERE Channel='Security' COLLATE NOCASE AND Image='a' COLLATE NOCASE"
+        )
+
+        assert refs == {"Channel", "Image"}
+
+
 class TestColumnRefsRightHandOperand:
     """A field-to-field comparison names a column on both sides.
 

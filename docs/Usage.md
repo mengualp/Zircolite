@@ -187,7 +187,9 @@ gh attestation verify Zircolite-<version>-<target>.zip --repo wagga40/Zircolite
 executable, which is the one later runs read. When that directory cannot be written to —
 a package extracted somewhere read-only or owned by another user — the rulesets go to
 `./rules` in the working directory instead, with a warning; later runs started from that
-directory pick them up first. `-U` never writes into `_internal/`.
+directory pick them up first. `-U` never writes into `_internal/`. The release archive
+ships only the SigmaHQ rulesets; `-U` adds the community and experimental ones described
+in [Rulesets](#rulesets--rules).
 
 **Pipelines.** A binary can apply only the pySigma pipelines it was built with, which
 `-pl` lists. Any other pipeline needs a source install.
@@ -345,6 +347,8 @@ unless `--fileext` or `--file-pattern` says otherwise.
 | `-sr`, `--save-ruleset` | Save the converted ruleset to disk |
 | `-p`, `--pipeline` | Use a pySigma pipeline; repeatable. A name that is not installed exits `2` |
 | `-pl`, `--pipeline-list` | List installed pipelines and exit |
+| `--timestamp-format` | How the time field is written, for correlation rules converted from YAML: `iso` (default), `unix`, `unix_ms` or `unix_us`. See [Sigma correlation rules](#sigma-correlation-rules) |
+| `--min-level` | Load only the rules at this level or above: `informational`, `low`, `medium`, `high` or `critical`. A rule without a level counts as `informational` |
 | `-R`, `--rulefilter` | Skip rules whose title contains this text (case-sensitive); repeatable |
 | `--test-rules` | JSON file of rule test cases; validate and exit |
 
@@ -359,7 +363,7 @@ unless `--fileext` or `--file-pattern` says otherwise.
 | `-d`, `--dbfile` | Save the logs to an SQLite database |
 | `-l`, `--logfile` | Log file name |
 | `--hashes` | Add an xxhash64 to each event. For CSV, EVTXtract and JSON-array input the reader hands over a parsed record rather than a source line, so the hash covers a canonical form of the event |
-| `-L`, `--limit` | Discard results from any rule matching more than this many events (positive integer, or `-1` to disable). Counted per input database: per file by default, corpus-wide with `--unified-db` |
+| `-L`, `--limit` | Discard results from any rule matching more than this many events — alerts, for a [correlation rule](#sigma-correlation-rules) (positive integer, or `-1` to disable). Counted per input database: per file by default, corpus-wide with `--unified-db` |
 | `--profile-rules` | Time each rule and print a performance report. Forces sequential processing |
 
 > [!NOTE]
@@ -542,9 +546,10 @@ detection and filtered counts.
 
 ### Detection results table
 
-Matches are shown in a table with four columns — **Severity**, **Rule**, **Events** and
-**ATT&CK** (technique IDs pulled from the rule tags). Rows are sorted by severity, then by
-event count. Severity is a fixed-width coloured badge: `CRITICAL` on red, `HIGH` on
+Matches are shown in a table with four columns — **Severity**, **Rule**, **Matches** and
+**ATT&CK** (technique IDs pulled from the rule tags). Matches counts events, or alerts for a
+[correlation rule](#sigma-correlation-rules), which reads `N alerts`; the summary panel
+counts the two apart as well. Rows are sorted by severity, then by match count. Severity is a fixed-width coloured badge: `CRITICAL` on red, `HIGH` on
 magenta, `MEDIUM` on yellow, `LOW` on green, and `INFO` on grey.
 
 In per-file mode each file's table is titled with its filename; in parallel mode results
@@ -568,7 +573,9 @@ exclude with `--rulefilter`.
 
 With `--csv`, detections are written as one flat table. The header covers every column of
 the events table plus `rule_title`, `rule_description`, `rule_level` and `rule_count`, so
-a rule returning wider rows than the ones before it does not lose fields.
+a rule returning wider rows than the ones before it does not lose fields. When correlation
+rules are loaded it also carries their alert columns, and nested values — an alert's
+`group_keys`, `event_ids` and `evidence` — are written as JSON text.
 
 The same holds across inputs. A header has to be written before the rows it describes,
 but one file can carry fields an earlier one never produced, so multi-file runs collect
@@ -589,12 +596,16 @@ Use JSON when you need the values exactly as stored.
 ### Sigma conversion summary
 
 Converting native Sigma rules prints a one-line summary — how many converted, how many
-were skipped as invalid (files that are not valid Sigma detection or correlation YAML),
-and how many failed:
+were skipped as invalid (files that are not valid Sigma detection, correlation or filter
+YAML), and how many failed:
 
 ```
 [✓] Converted 245 rules (3 invalid skipped, 2 failed)
 ```
+
+With several YAML paths there is one line per path, naming it. A file that cannot be
+loaded is reported by name and counted as failed; the other files of its directory still
+convert.
 
 ## Automatic Log Type Detection
 
@@ -912,11 +923,34 @@ published in [Zircolite-Rules-v2](https://github.com/wagga40/Zircolite-Rules-v2)
 | `rules_windows_generic.json` | Windows event logs without Sysmon (Security, System, …) |
 | `rules_linux.json` | Auditd and Sysmon for Linux |
 
-Each also has `_high` and `_medium` variants (that severity and above). `-U` or
-`task update-rules` fetches the current versions. `-U` writes to the `rules/` directory
-later runs read — the repository's from source, the one beside the executable in a
-[standalone binary](Usage.md#standalone-binaries) — and falls back to `./rules`, with a
-warning, when that directory cannot be written to.
+These SigmaHQ rulesets carry every level; `--min-level medium` (or `high`, …) keeps the
+rules at that level and above. The `_high` and `_medium` variants older installs carry are
+no longer published.
+
+`-U` installs everything the rules repository publishes for Zircolite:
+
+- the SigmaHQ rulesets above;
+- community rulesets, one file per source and profile, kept apart from the SigmaHQ ones:
+  Hayabusa (`rules_hayabusa_*`), Joe Security (`rules_joesecurity_*`), Micah Babinski
+  (`rules_mbabinski_*`), mdecrevoisier (`rules_mdecrevoisier_*`) and tsale (`rules_tsale_*`).
+  They keep their own licences — DRL 1.1, GPL 3.0 or CC0 1.0 — whose texts go to
+  `rules/licenses/`;
+- `rules/experimental/` — [correlation rulesets](#sigma-correlation-rules).
+
+Every file is checked against the SHA-256 the repository's `release-manifest.json` lists for
+it before any is installed; a file that does not match, or a ruleset the manifest does not
+name, leaves `rules/` as it was and makes `-U` exit `1`. A source whose last update failed
+upstream keeps its previous rulesets and is reported as stale. `-U` writes to the `rules/`
+directory later runs read — the repository's from source, the one beside the executable in
+a [standalone binary](Usage.md#standalone-binaries) — and falls back to `./rules`, with a
+warning, when that directory cannot be written to. `task update-rules` fetches the SigmaHQ
+rulesets only.
+
+A JSON ruleset is an array of rules, each with its `title`, `level`, `tags` and the SQL it
+runs (`rule`). Rulesets converted by pySigma's SQLite backend 2 also carry
+`schema_version: 2`, the fields each rule reads (`required_fields`) and, for a
+correlation, its `correlation_plan`. A ruleset of a newer schema than this Zircolite
+reads is refused with a message rather than run.
 
 Native Sigma rules in YAML work directly — Zircolite detects the format and converts them
 with [pySigma](https://github.com/SigmaHQ/pySigma):
@@ -929,27 +963,118 @@ python3 zircolite.py -e sample.evtx -r schtasks.yml -r ./sigma/rules/windows/pro
 
 ### Sigma correlation rules
 
-Correlation rules (`event_count`, `value_count`, `temporal`) use the same SQLite backend.
-Put the base rule(s) and the correlation rule in the **same YAML file** (a multi-document
-stream separated by `---`) or in the **same directory** passed to `--ruleset`, so that
-`name` references resolve. Two separate `--ruleset` paths load separate collections and
-cannot resolve references across them.
+Zircolite runs [Sigma correlation rules](https://sigmahq.io/docs/meta/correlations.html)
+as pySigma's SQLite backend 2 compiles them: `event_count`, `value_count`, `value_sum`,
+`value_avg`, `value_median`, `value_percentile`, `temporal` and `temporal_ordered`,
+including extended conditions such as `a and not b`, field aliases, and correlations of
+correlations. They need SQLite 3.38 or newer with its JSON functions; with an older
+SQLite, each correlation rule is reported at load time and as a rule that could not be
+evaluated.
 
-Rules that exist only as references for a correlation are compiled internally so the
-correlation SQL can embed their conditions, but they are not emitted as standalone
-detections — a converted ruleset therefore typically has one row per correlation rule.
+There are two ways to run them:
 
-Correlations using `timespan` need a timestamp column, and Zircolite aligns the backend's
-timestamp field with the one detected in your logs or set with `--timefield`. If detection
-finds `@timestamp` (sanitised to `timestamp`), the correlation SQL references `timestamp`
-rather than the default `SystemTime`. No configuration is needed.
+- **Compiled**: `-U` installs the correlation rulesets of the rules repository in
+  `rules/experimental/`. Run one with `-r rules/experimental/<file>.json`.
+- **Native Sigma**: pass the YAML. All the YAML paths of a run form one Sigma collection,
+  so a correlation can refer to a rule defined in another file or directory:
 
-Two limitations are worth knowing:
+  ```shell
+  python3 zircolite.py -e logs/ -r my_correlations/ -r ./sigma/rules/windows/process_creation -p sysmon -p windows-logsources
+  ```
 
-- **`timespan` on `event_count`**: the backend may not apply the time window in the
-  generated query, so counts can reflect every matching row rather than a rolling window.
-- **Event filtering**: correlation-only entries carry no Channel/EventID metadata, so they
-  are omitted from early filtering and the referenced base rules drive it instead.
+  A rule that only feeds a correlation is compiled into it and not reported on its own,
+  unless it says `generate: true`. A correlation naming a rule no path defines is reported
+  and skipped, with any correlation built on it; the other rules still run. Sigma filters
+  apply to the rules of every path.
+
+#### What a correlation reports
+
+A correlation match is an **alert**, not an event:
+
+```json
+{
+  "title": "Many cmd.exe on one host",
+  "rule_level": "high",
+  "result_type": "correlation",
+  "count": 2,
+  "alert_count": 2,
+  "event_count": 6,
+  "diagnostics": {"invalid_timestamp": 0, "missing_group_key": 0},
+  "matches": [
+    {
+      "result_type": "correlation",
+      "alert_id": "sigma_alert_83a6d54d5c8f54f4:1",
+      "group_keys": {"Computer": "iewin7"},
+      "occurrence_time": 1556656512.45,
+      "window_start": 1556655912.45,
+      "window_end": 1556656512.45,
+      "metric_name": "event_count",
+      "metric_value": 5,
+      "event_count": 5,
+      "event_ids": ["0:118", "0:121", "0:130", "0:131", "0:140"],
+      "child_alert_ids": [],
+      "evidence": [
+        {"event_id": "0:118", "source_table": "logs", "event": {"Computer": "IEWIN7", "Image": "C:\\Windows\\System32\\cmd.exe", "OriginalLogfile": "wmiexec.evtx"}}
+      ],
+      "SystemTime": "2019-04-30T20:35:12.450Z"
+    }
+  ]
+}
+```
+
+- `count` and `alert_count` count alerts; `event_count` counts the distinct events behind
+  them. In an alert, `metric_value` is the rule's count or statistic and `event_count` the
+  events of its window. `--limit` counts alerts.
+- `evidence` holds the events of each alert as they were ingested, `OriginalLogfile`
+  included. String group keys are folded to lower case; the evidence keeps the original.
+- The time field (`SystemTime`, or `--timefield`) is set to the moment the alert occurred,
+  so timelines and Timesketch place it like an event. Times in the alert itself are Unix
+  seconds.
+- CSV, the Mini-GUI and the Elasticsearch, Zinc and Timesketch templates write
+  `group_keys`, `event_ids` and `evidence` as JSON text; Splunk, NDJSON and SARIF keep them
+  nested.
+
+#### Windows
+
+Counts and statistics look back over `[t - timespan, t]` from each event that could
+complete them, and each qualifying moment is its own alert: a burst that keeps going
+raises an alert at every event past the threshold, each with the events of its window.
+Ordered stages need strictly increasing timestamps; equal ones prove no order. An absence
+condition (`a and not b`) waits for its window to end. The latest timestamp in the input,
+matched or not, is where observation ends, and a window still open there is reported as
+`incomplete_window` rather than as an alert.
+
+#### Timestamps
+
+The time field must hold ISO 8601 text, as EVTX, XML, Sysmon for Linux and auditd events
+do. For Unix time — common in JSON logs — convert the YAML with `--timestamp-format unix`,
+`unix_ms` or `unix_us` (`rules.timestamp_format` in a run configuration). A compiled ruleset
+keeps what it was converted with: the rules repository's use `SystemTime` in ISO 8601.
+
+Events whose timestamp cannot be read, or that lack a group-by field, are set aside and
+counted in the result's `diagnostics`. The run ends with a warning naming each rule that
+set events aside, even when it raised no alert — a time field that does not hold what the
+rule expects shows up only there. Check `--timefield` and `--timestamp-format` first.
+
+#### One database
+
+A correlation sees the events of its database. When correlation rules are loaded and
+there are several input files, Zircolite puts them all in one database
+([unified mode](#parallel-processing)) whatever auto mode would have chosen, and ignores
+`--executor process` and `--parallel-workers`. `--no-auto-mode` keeps one database per
+file, with a warning that each correlation then sees one file at a time. Several
+`--db-input` databases are always analysed separately. For large inputs, `--working-db
+disk` keeps the events database out of memory.
+
+While a correlation rule is loaded, [early event filtering](Advanced.md#early-event-filtering)
+is off: every event counts towards where observation ends and towards absence windows.
+
+#### Cost
+
+A correlation builds indexed temporary tables from the whole events table. Dense windows
+make for large evidence, since an event inside many windows appears in every one of their
+alerts. `--limit` discards a rule with too many alerts, but the work to find them is
+already done. Ctrl+C stops a correlation in the middle of a statement.
 
 ### Rules with very large value lists
 
@@ -990,6 +1115,10 @@ sigma convert -t sqlite -f zircolite -p windows-audit -p windows-logsources rule
 - `-p` names a pipeline; repeat for several.
 - `-s` continues on error, for unsupported rules.
 - `-o` is the output file.
+
+For correlation rules, also point the backend at Zircolite's columns:
+`-O timestamp_field=SystemTime -O event_id_field=row_id` (add `-O timestamp_format=unix`
+for Unix time). Converting with `-r` in Zircolite does this for you.
 
 ### Why You Should Build Your Own Rulesets
 
@@ -1250,8 +1379,11 @@ docker run --rm --tty \
     -o /case/output/detected_events.json
 ```
 
-That uses the rulesets baked into the image. To use your own, put them in a mounted
-directory and give the container path: `--ruleset /case/input/my_ruleset.json`.
+That uses the rulesets baked into the image: everything `-U` installs when the image is
+built, so the SigmaHQ rulesets, the community rulesets with their licence texts in
+`rules/licenses/`, and the correlation rulesets in `rules/experimental/`. The community
+rulesets keep their own licences (DRL 1.1, GPL 3.0 or CC0 1.0). To use your own, put them
+in a mounted directory and give the container path: `--ruleset /case/input/my_ruleset.json`.
 
 The image runs as the unprivileged user `zircolite` (uid 999). Docker Desktop and OrbStack
 on macOS remap bind mounts so that works as it is. On a Linux host the results folder
@@ -1286,6 +1418,9 @@ To build the image yourself: `docker build . -t <image name>`.
 | **macOS refuses to open the binary** | Clear the quarantine flag from the whole extracted directory: `xattr -dr com.apple.quarantine <directory>` — see [Standalone binaries](Usage.md#standalone-binaries) |
 | **A Linux binary fails with `GLIBC_2.xx not found`** | The distribution is older than glibc 2.28. Run from source or use Docker |
 | **`-U` warns that it cannot write and uses `./rules`** | The package directory is read-only for your user. Later runs from the same working directory still find the new rulesets; to update the package itself, extract it somewhere writable |
+| **`-U` exits `1`: files do not match the release manifest** | The download is incomplete or the repository was caught mid-update; nothing was installed. Run `-U` again later |
+| **A correlation rule raises no alert, and the run warns that events were set aside** | The time field does not hold what the rule expects: check `--timefield`, and `--timestamp-format` for Unix time. See [Sigma correlation rules](#sigma-correlation-rules) |
+| **Correlation rules are reported as needing SQLite 3.38** | The Python running Zircolite links an older SQLite (Ubuntu 22.04's, for one). Use a newer Python, a standalone binary or Docker |
 
 `--debug` gives full tracebacks and debug logging. For large datasets, filtering and
 templating see [Advanced](Advanced.md); for architecture see [Internals](Internals.md).

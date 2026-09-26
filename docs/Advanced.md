@@ -311,7 +311,10 @@ python3 zircolite.py --evtx ./logs/ --ruleset rules/rules_windows_merged.json
     [>] Parallel    ENABLED (4 workers)
 ```
 
-**Database mode.** The rules are tried in order; the first match decides.
+**Database mode.** The rules are tried in order; the first match decides. When
+[correlation rules](Usage.md#sigma-correlation-rules) are loaded and there are several
+files, none of this applies: every file goes into one database, since a correlation only
+sees the events of its own.
 
 | # | Condition | Mode | Reason |
 |---|-----------|------|--------|
@@ -457,7 +460,7 @@ unbounded when the rule's SQL:
   anything;
 - does not mention `EventID`, or constrains it in a form this cannot read (`BETWEEN`,
   `>`, `LIKE`);
-- belongs to a **correlation** rule, whose subquery shape is deliberately not
+- belongs to a legacy **correlation** rule, whose subquery shape is deliberately not
   second-guessed.
 
 A rule naming a channel but no eventID matches *any* eventID on that channel, so it marks
@@ -472,13 +475,17 @@ a finite eventID set and the event's EventID is not in it. An event with no usab
 or no usable EventID on a bounded channel, is **kept** — too little information to discard
 it safely. Channel matching is case-insensitive.
 
-The per-channel bounds do not apply in two cases. A rule constraining eventIDs but no
+The per-channel bounds do not apply in three cases. A rule constraining eventIDs but no
 channel cannot be keyed by channel, so a ruleset containing one falls back to two
-independent global axes, each filtering only when every rule constrains it. And a
-correlation rule carries no channel metadata at all: its channel is read from the SQL
-embedding the base rule's detection. If that names no channel either — pySigma emits
-correlation queries without one when the logsource carried no pipeline — filtering is
-switched off for the whole run rather than guessed at.
+independent global axes, each filtering only when every rule constrains it. A correlation
+rule converted by the SQLite backend 2 carries a correlation plan, and the filter is off
+for the whole run while one is loaded: the latest timestamp in the input, matched or not,
+is where its observation ends, and an absence condition such as `a and not b` waits for
+events no rule matches. And a legacy correlation rule (backend 1) carries no channel
+metadata at all: its channel is read from the SQL embedding the base rule's detection. If
+that names no channel either — pySigma emits correlation queries without one when the
+logsource carried no pipeline — filtering is switched off for the whole run rather than
+guessed at.
 
 #### Configuration and reporting
 

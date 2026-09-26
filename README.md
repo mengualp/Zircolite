@@ -21,6 +21,7 @@
 - **Automatic Log Type Detection**: Automatically identifies log formats and timestamp fields using magic bytes, content analysis, and regex-based fallback -- no need to specify format flags in most cases.
 - **Multiple Input Formats**: Supports various log formats including EVTX, JSON Lines, JSON Arrays, CSV, XML, and more. Compressed or archived logs (gzip, bzip2, ZIP, 7-Zip) are supported; use `--archive-password` for encrypted ZIP/7z.
 - **Native Sigma Support**: Zircolite can directly use native Sigma rules (YAML) by converting them with pySigma.
+- **Sigma Correlations**: Counts, value statistics and temporal sequences — absence conditions and chains included — across every input file, each alert reported with the events behind it.
 - **SIGMA Backend**: It is based on a SIGMA backend (SQLite) and does not use internal SIGMA-to-something conversion.
 - **Advanced Log Manipulation**: It can manipulate input logs by splitting fields and applying transformations, allowing for more flexible and powerful log analysis.
 - **Field Transforms**: Apply custom Python transformations to fields during processing (e.g., Base64 decoding, hex-to-ASCII conversion).
@@ -199,7 +200,7 @@ Given several files, Zircolite measures them against available RAM and CPU, pick
 python3 zircolite.py --evtx ./logs/ --ruleset rules/rules_windows_merged.json
 ```
 
-Override any of it with `--no-auto-mode`, `--unified-db` (one database for all files, which is what cross-file correlation rules need), `--no-parallel` or `--parallel-workers N`. See [Automatic Processing Optimization](docs/Advanced.md#automatic-processing-optimization) for how the choice is made.
+Override any of it with `--no-auto-mode`, `--unified-db` (one database for all files, which auto mode also picks whenever correlation rules are loaded), `--no-parallel` or `--parallel-workers N`. See [Automatic Processing Optimization](docs/Advanced.md#automatic-processing-optimization) for how the choice is made.
 
 ### Using YAML Configuration Files
 
@@ -226,11 +227,15 @@ rules and the options that have no YAML equivalent.
 python3 zircolite.py -U
 ```
 
-From source this rewrites the repository's `rules/`. A standalone binary writes to the
-`rules/` directory beside its executable, and falls back to `./rules` in the working
-directory, with a warning, when that one cannot be written to.
+`-U` installs the SigmaHQ rulesets, the community rulesets published beside them (each
+under its own licence, whose text goes to `rules/licenses/`) and the experimental
+correlation rulesets in `rules/experimental/`, after checking every file against the rules
+repository's release manifest. From source it writes to the repository's `rules/`. A
+standalone binary writes to the `rules/` directory beside its executable, and falls back
+to `./rules` in the working directory, with a warning, when that one cannot be written to.
+See [Rulesets](docs/Usage.md#rulesets--rules).
 
-Alternatively, if you use [Task](https://taskfile.dev/) (go-task), run `task update-rules` from the project root to update rules from [Zircolite-Rules-v2](https://github.com/wagga40/Zircolite-Rules-v2). See [docs](docs/README.md) for other tasks (Docker build, clean, etc.).
+Alternatively, if you use [Task](https://taskfile.dev/) (go-task), run `task update-rules` from the project root to update the SigmaHQ rulesets from [Zircolite-Rules-v2](https://github.com/wagga40/Zircolite-Rules-v2). See [docs](docs/README.md) for other tasks (Docker build, clean, etc.).
 
 > [!IMPORTANT]  
 > Please note that these rulesets are provided to use Zircolite out of the box, but [you should generate your own rulesets](docs/Usage.md#why-you-should-build-your-own-rulesets) as they can be noisy or slow. These auto-updated rulesets are available in the dedicated repository: [Zircolite-Rules-v2](https://github.com/wagga40/Zircolite-Rules-v2).

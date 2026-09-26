@@ -17,6 +17,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import patch
 
 import pytest
@@ -3882,3 +3883,149 @@ class TestEvidenceNamesPrintAsWritten:
             zircolite_script.main()
 
         assert "[bold]x.evtx" in capsys.readouterr().out
+
+
+@pytest.mark.requires_sigma
+@pytest.mark.skipif(__import__("sqlite3").sqlite_version_info < (3, 38), reason="correlation plans need SQLite 3.38")
+class TestCorrelationsNeedOneDatabase:
+    """A correlation only sees the events of its database; per-file and
+    parallel modes give every file a database of its own."""
+
+    BASE: ClassVar[dict] = {"title": "base", "name": "base", "logsource": {"product": "windows"},
+            "detection": {"s": {"EventID": 1}, "condition": "s"}}
+    BURST: ClassVar[dict] = {"title": "burst", "level": "high", "correlation": {
+        "type": "event_count", "rules": ["base"], "group-by": ["Host"],
+        "timespan": "5s", "condition": {"gte": 2}}}
+
+    def _run(self, tmp_path, *extra, stamps=("2024-01-01T00:00:00Z", "2024-01-01T00:00:01Z")):
+        import yaml
+
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        for i, stamp in enumerate(stamps):
+            (logs / f"{i}.json").write_text(json.dumps({"SystemTime": stamp, "Host": "h", "EventID": 1}) + "\n")
+        base = tmp_path / "base.yml"
+        burst = tmp_path / "burst.yml"
+        base.write_text(yaml.safe_dump(self.BASE))
+        burst.write_text(yaml.safe_dump(self.BURST))
+        output = tmp_path / "detections.json"
+        argv = ["zircolite.py", "-e", str(logs), "-j", "-r", str(burst), str(base), "-o", str(output),
+                "--timefield", "SystemTime", *get_log_arg(tmp_path), *extra]
+        with patch("sys.argv", argv):
+            zircolite_script.main()
+        return json.loads(output.read_text()), (tmp_path / "test.log").read_text()
+
+    def test_files_are_correlated_in_one_database(self, tmp_path):
+        results, log = self._run(tmp_path)
+
+        [result] = results
+        assert result["alert_count"] == 1
+        assert result["event_count"] == 2
+        assert {e["event"]["OriginalLogfile"] for e in result["matches"][0]["evidence"]} == {"0.json", "1.json"}
+        assert "correlation rule(s) need every file in one database" in log
+
+    @pytest.mark.parametrize("fmt,stamps", [
+        ("unix", (1704067200, 1704067201)),
+        ("unix_ms", (1704067200000, 1704067201000)),
+        ("unix_us", ("1704067200000000", "1704067201000000")),
+    ])
+    def test_numeric_timestamps_need_their_format(self, tmp_path, fmt, stamps):
+        results, _ = self._run(tmp_path, "--timestamp-format", fmt, stamps=stamps)
+
+        [result] = results
+        assert result["alert_count"] == 1
+        assert result["matches"][0]["SystemTime"] == "2024-01-01T00:00:01.000Z"
+
+    def test_numeric_timestamps_read_as_iso_are_reported(self, tmp_path):
+        results, log = self._run(tmp_path, stamps=(1704067200, 1704067201))
+
+        assert results == []
+        assert "2 event(s) without a valid timestamp" in log
+
+    def test_no_auto_mode_keeps_files_apart_and_says_so(self, tmp_path):
+        results, log = self._run(tmp_path, "--no-auto-mode")
+
+        assert results == []
+        assert "see one file at a time" in log
+
+    def test_an_explicit_process_executor_is_reported_as_ignored(self, tmp_path):
+        results, log = self._run(tmp_path, "--executor", "process")
+
+        assert results[0]["alert_count"] == 1
+        assert "--executor process ignored" in log
+
+
+class TestTimestampFormatOption:
+    def test_an_unknown_format_is_refused(self, tmp_path):
+        with patch("sys.argv", ["zircolite.py", "-e", str(tmp_path), "--timestamp-format", "epoch"]):
+            with pytest.raises(SystemExit) as exc:
+                zircolite_script.parse_arguments()
+        assert exc.value.code == 2
+
+    def test_it_is_said_to_do_nothing_for_json_rulesets(self, tmp_path):
+        events = tmp_path / "events.json"
+        events.write_text('{"EventID": 1}\n')
+        ruleset = tmp_path / "rules.json"
+        ruleset.write_text(json.dumps([{"title": "t", "level": "high", "rule": ["SELECT * FROM logs WHERE EventID=1"]}]))
+        argv = ["zircolite.py", "-e", str(events), "-j", "-r", str(ruleset), "--timestamp-format", "unix",
+                "-o", str(tmp_path / "out.json"), *get_log_arg(tmp_path)]
+
+        with patch("sys.argv", argv):
+            zircolite_script.main()
+
+        assert "--timestamp-format only applies" in (tmp_path / "test.log").read_text()
+
+
+class TestUpdateRulesExitStatus:
+    @pytest.mark.parametrize("installed,code", [(True, 0), (False, 1)])
+    def test_a_failed_update_fails_the_command(self, installed, code):
+        """An image build running -U must not ship stale rulesets quietly."""
+        with patch("sys.argv", ["zircolite.py", "-U"]), \
+                patch.object(zircolite_script.RulesUpdater, "run", return_value=installed):
+            with pytest.raises(SystemExit) as exc:
+                zircolite_script.main()
+
+        assert exc.value.code == code
+
+
+class TestMinLevelOption:
+    def test_only_rules_at_the_level_or_above_run(self, tmp_path):
+        events = tmp_path / "events.json"
+        events.write_text('{"EventID": 1}\n')
+        ruleset = tmp_path / "rules.json"
+        ruleset.write_text(json.dumps([
+            {"title": "loud", "level": "high", "rule": ["SELECT * FROM logs WHERE EventID=1"]},
+            {"title": "quiet", "level": "low", "rule": ["SELECT * FROM logs WHERE EventID=1"]},
+        ]))
+        output = tmp_path / "out.json"
+        argv = ["zircolite.py", "-e", str(events), "-j", "-r", str(ruleset), "--min-level", "medium",
+                "-o", str(output), *get_log_arg(tmp_path)]
+
+        with patch("sys.argv", argv):
+            zircolite_script.main()
+
+        assert [result["title"] for result in json.loads(output.read_text())] == ["loud"]
+
+    def test_an_unknown_level_is_refused(self, tmp_path):
+        with patch("sys.argv", ["zircolite.py", "-e", str(tmp_path), "--min-level", "severe"]):
+            with pytest.raises(SystemExit) as exc:
+                zircolite_script.parse_arguments()
+        assert exc.value.code == 2
+
+
+class TestCorrelationRuleCount:
+    def test_rules_removed_by_rulefilter_do_not_count(self):
+        rules = [{"title": "burst", "correlation": True}, {"title": "noise", "correlation": True}, {"title": "plain"}]
+
+        assert zircolite_script._correlation_rule_count(rules, None) == 2
+        assert zircolite_script._correlation_rule_count(rules, ["noi"]) == 1
+
+    def test_several_databases_are_said_to_stay_apart(self, caplog):
+        logger = logging.getLogger("correlation-databases")
+        with caplog.at_level(logging.WARNING, logger="correlation-databases"):
+            zircolite_script._warn_correlations_across_databases(2, 3, logger)
+            zircolite_script._warn_correlations_across_databases(2, 1, logger)
+            zircolite_script._warn_correlations_across_databases(0, 3, logger)
+
+        assert len(caplog.records) == 1
+        assert "3 databases" in caplog.text
